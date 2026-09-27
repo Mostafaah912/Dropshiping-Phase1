@@ -133,6 +133,98 @@ test_assert($simplePriceDisplay['display'] === '90,000', 'قیمت simple هما
 test_assert($samePriceDisplay['is_range'] === false, 'وقتی همه Variationها قیمت یکسان دارند، is_range=false (یک عدد ساده نمایش داده می‌شود نه بازه بی‌فایده)');
 test_assert($samePriceDisplay['display'] === '100,000', 'در حالت هم‌قیمت، فقط همان یک عدد نشان داده می‌شود');
 
+// =============================================================================
+// تست ۴ — بازتولید دقیق گزارش کاربر: قیمت هست، attributes/stock نیست.
+// این تست کل مسیر واقعی را طی می‌کند: ردیف خام DB (نه یک آرایه دستی ساخته‌شده
+// در تست) → HMW_REST_API::format_product() واقعی → HCI_Products::build_product_json_entry()
+// واقعی. اگر این‌جا هم "-, -" با ورودیِ attributes/stock_quantity خالی از DB
+// بازتولید شود، ثابت می‌کند مشکل در هیچ‌کدام از این دو تابع نیست — بلکه دقیقاً
+// همان ستون‌های خالیِ DB (داده‌ی Sync قدیمی، قبل از اضافه‌شدن ستون attributes
+// در فاز ۱) به‌درستی به UI منتقل می‌شود.
+// =============================================================================
+test_section('تست ۴ — بازتولید گزارش کاربر با ردیف خام DB واقعی (نه فرض دستی)');
+
+$formatProductMethod = new ReflectionMethod('HMW_REST_API', 'format_product');
+$formatProductMethod->setAccessible(true);
+
+// دقیقاً همان الگوی Screenshot: price = 264990.0000 هست، attributes/stock_quantity خالی است.
+$staleVariationDbRow = array(
+    'source_product_id' => 950,
+    'parent_product_id' => 900,
+    'sku' => null,
+    'price' => '264990.0000',
+    'stock_quantity' => null, // ستونی که از قبل هم وجود داشت (پیش از فاز ۱) — اینجا واقعاً NULL است در DB
+    'attributes' => '',       // ستون جدید فاز ۱ — روی رکورد Sync‌نشده، خالی می‌ماند
+);
+
+$staleParentRow = array(
+    'source_product_id' => 900,
+    'parent_product_id' => null,
+    'product_type' => 'variable',
+    'source_status' => 'publish',
+    'sku' => 'STALE-900',
+    'name' => 'محصول Variable با Sync قدیمی',
+    'price' => '264990',
+    'stock_quantity' => null,
+    'stock_status' => 'instock',
+    'manage_stock' => 0,
+    'image_url' => null,
+    'gallery' => '',
+    'product_url' => null,
+    'category_path' => '',
+    'category_ids' => '',
+    'attributes' => '', // attributes سطح parent هم خالی است — همان الگوی Sync قدیمی
+    'short_description' => '',
+    'source_modified_gmt' => null,
+    'is_active' => 1,
+    'last_synced_at' => '2026-01-01 00:00:00', // Sync قدیمی، قبل از فاز ۱
+    'updated_at' => '2026-01-01 00:00:00',
+);
+
+$staleVariationsByParent = array(900 => array($staleVariationDbRow));
+$staleFormatted = $formatProductMethod->invoke(null, $staleParentRow, array(), $staleVariationsByParent);
+$staleClientJson = $buildJsonMethod->invoke(null, $staleFormatted);
+
+test_evidence('خروجی format_product() برای همین سناریو (Sync قدیمی)', $staleFormatted['variations'][0]);
+test_evidence('خروجی build_product_json_entry() (همان چیزی که JS از آن می‌خواند)', $staleClientJson['variations'][0]);
+
+test_assert(
+    $staleClientJson['variations'][0]['price'] === '264990.0000',
+    'قیمت خام دقیقاً همان‌طور که در Screenshot دیده شد منتقل می‌شود (264990.0000)'
+);
+test_assert(
+    $staleClientJson['variations'][0]['attributes'] === array(),
+    'attributes این Variation آرایه خالی است — دقیقاً همان چیزی که در UI به‌صورت "-" رندر می‌شود؛ نه Bug در format_product/build_product_json_entry، بلکه ستون DB واقعاً خالی است'
+);
+test_assert(
+    $staleClientJson['variations'][0]['stock_quantity'] === null,
+    'stock_quantity این Variation دقیقاً null است — در UI به‌درستی "-" نشان داده می‌شود'
+);
+
+// حالا مقایسه: همان مسیر کد، اما با یک ردیف DB که واقعاً Sync‌شده (attributes/stock پر است)
+$freshVariationDbRow = array(
+    'source_product_id' => 951,
+    'parent_product_id' => 900,
+    'sku' => 'FRESH-951',
+    'price' => '264990.0000',
+    'stock_quantity' => '7.0000',
+    'attributes' => json_encode(array(array('name' => 'رنگ', 'option' => 'آبی'))),
+);
+$freshVariationsByParent = array(900 => array($freshVariationDbRow));
+$freshFormatted = $formatProductMethod->invoke(null, $staleParentRow, array(), $freshVariationsByParent);
+$freshClientJson = $buildJsonMethod->invoke(null, $freshFormatted);
+
+test_evidence('همان مسیر کد با ردیف DB واقعاً Sync‌شده (برای مقایسه)', $freshClientJson['variations'][0]);
+
+test_assert(
+    $freshClientJson['variations'][0]['attributes'] === array(array('name' => 'رنگ', 'option' => 'آبی')),
+    'وقتی ستون attributes در DB واقعاً پر باشد، همین دقیقاً همان کد (بدون هیچ تغییری) آن را درست منتقل می‌کند — یعنی خودِ کد سالم است'
+);
+test_assert(
+    $freshClientJson['variations'][0]['stock_quantity'] === 7.0,
+    'وقتی ستون stock_quantity در DB پر باشد، همان کد آن را هم درست منتقل می‌کند'
+);
+
 echo "\n=== جمع‌بندی نمایش محصول Variable ===\n";
 echo "PASS: {$GLOBALS['__test_passes']}\n";
 echo "FAIL: {$GLOBALS['__test_failures']}\n";

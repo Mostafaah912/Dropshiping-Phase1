@@ -2,7 +2,7 @@
 /**
  * Plugin Name: HeyMode Wholesale
  * Description: Snapshot محصولات و Variationهای هی‌مد با Full Sync و Cron روزانه ساعت ۴.
- * Version: 1.8.0
+ * Version: 1.9.0
  * Requires at least: 6.5
  * Requires PHP: 8.1
  * Author: HeyMode
@@ -11,7 +11,7 @@
 
 defined('ABSPATH') || exit;
 
-if (!defined('HMW_VERSION')) define('HMW_VERSION', '1.8.0');
+if (!defined('HMW_VERSION')) define('HMW_VERSION', '1.9.0');
 if (!defined('HMW_FILE')) define('HMW_FILE', __FILE__);
 if (!defined('HMW_DIR')) define('HMW_DIR', plugin_dir_path(__FILE__));
 if (!defined('HMW_URL')) define('HMW_URL', plugin_dir_url(__FILE__));

@@ -36,6 +36,10 @@ final class HMW_DB {
             image_url TEXT NULL,
             product_url TEXT NULL,
             category_path LONGTEXT NULL,
+            short_description LONGTEXT NULL,
+            gallery LONGTEXT NULL,
+            category_ids LONGTEXT NULL,
+            attributes LONGTEXT NULL,
             source_modified_gmt DATETIME NULL,
             is_active TINYINT(1) NOT NULL DEFAULT 0,
             last_sync_run_uuid CHAR(36) NULL,
@@ -124,6 +128,32 @@ final class HMW_DB {
         return is_array($rows) ? $rows : array();
     }
 
+    public static function get_variation_rows_for_parents(array $parent_ids, bool $include_inactive = false): array {
+        global $wpdb;
+        $parent_ids = array_values(array_unique(array_filter(array_map('intval', $parent_ids))));
+        if (!$parent_ids) {
+            return array();
+        }
+        $placeholders = implode(',', array_fill(0, count($parent_ids), '%d'));
+        $active_sql = $include_inactive ? '' : ' AND is_active = 1';
+        $rows = $wpdb->get_results(
+            $wpdb->prepare(
+                'SELECT source_product_id, parent_product_id, sku, price, stock_quantity, attributes FROM ' . self::products_table() .
+                " WHERE parent_product_id IN ({$placeholders}) AND product_type = 'variation'{$active_sql} ORDER BY source_product_id ASC",
+                $parent_ids
+            ),
+            ARRAY_A
+        );
+        if (!is_array($rows)) {
+            return array();
+        }
+        $grouped = array();
+        foreach ($rows as $row) {
+            $grouped[(int) $row['parent_product_id']][] = $row;
+        }
+        return $grouped;
+    }
+
     public static function bulk_upsert_products(array $rows): array {
         global $wpdb;
 
@@ -165,7 +195,8 @@ final class HMW_DB {
         $columns = array(
             'source_product_id', 'parent_product_id', 'product_type', 'source_status', 'sku', 'name',
             'price', 'stock_quantity', 'stock_status', 'manage_stock', 'image_url', 'product_url',
-            'category_path', 'source_modified_gmt', 'is_active', 'last_sync_run_uuid', 'last_synced_at',
+            'category_path', 'short_description', 'gallery', 'category_ids', 'attributes',
+            'source_modified_gmt', 'is_active', 'last_sync_run_uuid', 'last_synced_at',
             'created_at', 'updated_at'
         );
 
@@ -189,6 +220,10 @@ final class HMW_DB {
                 'image_url'           => $data['image_url'] ?? null,
                 'product_url'         => $data['product_url'] ?? null,
                 'category_path'       => (string) ($data['category_path'] ?? ''),
+                'short_description'   => (string) ($data['short_description'] ?? ''),
+                'gallery'             => (string) ($data['gallery'] ?? ''),
+                'category_ids'        => (string) ($data['category_ids'] ?? ''),
+                'attributes'          => (string) ($data['attributes'] ?? ''),
                 'source_modified_gmt' => $data['source_modified_gmt'] ?: null,
                 'is_active'           => !empty($data['is_active']) ? 1 : 0,
                 'last_sync_run_uuid'  => (string) ($data['run_uuid'] ?? ''),
@@ -217,6 +252,10 @@ final class HMW_DB {
                     $updated++;
                 } else {
                     $unchanged++;
+                    // فیلدهای غیرقابل‌مقایسه (مثلاً short_description) ممکن است تغییر کرده
+                    // باشند، اما چون در تشخیص "تغییر واقعی" لحاظ نمی‌شوند، updated_at را
+                    // دست‌نخورده نگه می‌داریم تا فیلتر updated_after/دیتای Delta معتبر بماند.
+                    $row['updated_at'] = (string) ($old['updated_at'] ?? $now);
                 }
             }
 
@@ -234,6 +273,10 @@ final class HMW_DB {
             $vals[] = $row['image_url'] === null ? 'NULL' : $wpdb->prepare('%s', $row['image_url']);
             $vals[] = $row['product_url'] === null ? 'NULL' : $wpdb->prepare('%s', $row['product_url']);
             $vals[] = $wpdb->prepare('%s', $row['category_path']);
+            $vals[] = $wpdb->prepare('%s', $row['short_description']);
+            $vals[] = $wpdb->prepare('%s', $row['gallery']);
+            $vals[] = $wpdb->prepare('%s', $row['category_ids']);
+            $vals[] = $wpdb->prepare('%s', $row['attributes']);
             $vals[] = $row['source_modified_gmt'] === null ? 'NULL' : $wpdb->prepare('%s', $row['source_modified_gmt']);
             $vals[] = $wpdb->prepare('%d', $row['is_active']);
             $vals[] = $wpdb->prepare('%s', $row['last_sync_run_uuid']);
@@ -291,6 +334,10 @@ final class HMW_DB {
             'image_url'           => $data['image_url'] ?? null,
             'product_url'         => $data['product_url'] ?? null,
             'category_path'       => (string) ($data['category_path'] ?? ''),
+            'short_description'   => (string) ($data['short_description'] ?? ''),
+            'gallery'             => (string) ($data['gallery'] ?? ''),
+            'category_ids'        => (string) ($data['category_ids'] ?? ''),
+            'attributes'          => (string) ($data['attributes'] ?? ''),
             'source_modified_gmt' => $data['source_modified_gmt'] ?: null,
             'is_active'           => !empty($data['is_active']) ? 1 : 0,
             'last_sync_run_uuid'  => (string) ($data['run_uuid'] ?? ''),
@@ -320,6 +367,9 @@ final class HMW_DB {
                 $changed = true;
                 break;
             }
+        }
+        if (!$changed) {
+            $row['updated_at'] = (string) ($existing['updated_at'] ?? $now);
         }
 
         $result = $wpdb->update(

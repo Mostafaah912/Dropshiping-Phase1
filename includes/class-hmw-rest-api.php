@@ -64,6 +64,19 @@ final class HMW_REST_API {
             ),
         ));
 
+        register_rest_route(self::NAMESPACE, '/products/delta', array(
+            array(
+                'methods' => WP_REST_Server::READABLE,
+                'callback' => array(__CLASS__, 'products_delta'),
+                'permission_callback' => array(__CLASS__, 'authorize'),
+                'args' => array(
+                    'updated_after' => array('required' => true, 'sanitize_callback' => 'sanitize_text_field'),
+                    'page' => array('default' => 1, 'sanitize_callback' => 'absint'),
+                    'per_page' => array('default' => 100, 'sanitize_callback' => 'absint'),
+                ),
+            ),
+        ));
+
         register_rest_route(self::NAMESPACE, '/products/(?P<id>\d+)', array(
             array(
                 'methods' => WP_REST_Server::READABLE,
@@ -189,7 +202,7 @@ final class HMW_REST_API {
 
         $where_sql = implode(' AND ', $where);
         $count_sql = "SELECT COUNT(*) FROM {$table} WHERE {$where_sql}";
-        $data_sql = "SELECT source_product_id, parent_product_id, product_type, source_status, sku, name, price, stock_quantity, stock_status, manage_stock, image_url, product_url, category_path, source_modified_gmt, is_active, last_synced_at, updated_at FROM {$table} WHERE {$where_sql} ORDER BY source_product_id ASC LIMIT %d OFFSET %d";
+        $data_sql = "SELECT source_product_id, parent_product_id, product_type, source_status, sku, name, price, stock_quantity, stock_status, manage_stock, image_url, product_url, category_path, short_description, gallery, category_ids, attributes, source_modified_gmt, is_active, last_synced_at, updated_at FROM {$table} WHERE {$where_sql} ORDER BY source_product_id ASC LIMIT %d OFFSET %d";
 
         if ($params) {
             $total = (int) $wpdb->get_var($wpdb->prepare($count_sql, $params));
@@ -206,7 +219,18 @@ final class HMW_REST_API {
             ), 500);
         }
 
-        $items = array_map(array(__CLASS__, 'format_product'), $rows);
+        $category_map = HMW_Sync::get_cached_category_map();
+        $variable_ids = array();
+        foreach ($rows as $r) {
+            if (($r['product_type'] ?? '') === 'variable') {
+                $variable_ids[] = (int) $r['source_product_id'];
+            }
+        }
+        $variations_by_parent = $variable_ids ? HMW_DB::get_variation_rows_for_parents($variable_ids, $include_inactive) : array();
+
+        $items = array_map(static function (array $row) use ($category_map, $variations_by_parent): array {
+            return HMW_REST_API::format_product($row, $category_map, $variations_by_parent);
+        }, $rows);
         $total_pages = $total > 0 ? (int) ceil($total / $per_page) : 0;
 
         $response = array(
@@ -245,7 +269,7 @@ final class HMW_REST_API {
         $id = (int) $request->get_param('id');
         $table = HMW_DB::products_table();
         $row = $wpdb->get_row($wpdb->prepare(
-            "SELECT source_product_id, parent_product_id, product_type, source_status, sku, name, price, stock_quantity, stock_status, manage_stock, image_url, product_url, category_path, source_modified_gmt, is_active, last_synced_at, updated_at FROM {$table} WHERE source_product_id = %d LIMIT 1",
+            "SELECT source_product_id, parent_product_id, product_type, source_status, sku, name, price, stock_quantity, stock_status, manage_stock, image_url, product_url, category_path, short_description, gallery, category_ids, attributes, source_modified_gmt, is_active, last_synced_at, updated_at FROM {$table} WHERE source_product_id = %d LIMIT 1",
             $id
         ), ARRAY_A);
 
@@ -256,16 +280,23 @@ final class HMW_REST_API {
             ), 404);
         }
 
-        if ((int) $row['is_active'] !== 1 && !rest_sanitize_boolean($request->get_param('include_inactive'))) {
+        $include_inactive = rest_sanitize_boolean($request->get_param('include_inactive'));
+        if ((int) $row['is_active'] !== 1 && !$include_inactive) {
             return new WP_REST_Response(array(
                 'success' => false,
                 'error' => array('code' => 'not_found', 'message' => 'محصول فعال نیست.'),
             ), 404);
         }
 
+        $category_map = HMW_Sync::get_cached_category_map();
+        $variations_by_parent = array();
+        if (($row['product_type'] ?? '') === 'variable') {
+            $variations_by_parent = HMW_DB::get_variation_rows_for_parents(array((int) $row['source_product_id']), $include_inactive);
+        }
+
         return new WP_REST_Response(array(
             'success' => true,
-            'data' => self::format_product($row),
+            'data' => self::format_product($row, $category_map, $variations_by_parent),
             'server' => array(
                 'generated_at_utc' => gmdate('c'),
                 'generated_at_tehran' => wp_date('c', time(), new DateTimeZone(HMW_TIMEZONE)),
@@ -433,38 +464,198 @@ final class HMW_REST_API {
         );
     }
 
-    private static function format_product(array $row): array {
-        $category_path = array();
-        if (isset($row['category_path']) && $row['category_path'] !== null && $row['category_path'] !== '') {
-            $decoded = json_decode((string) $row['category_path'], true);
-            if (is_array($decoded)) {
-                $category_path = array_values(array_map('strval', $decoded));
-            } else {
-                $legacy_path = trim((string) $row['category_path']);
-                if ($legacy_path !== '') {
-                    $category_path = array($legacy_path);
-                }
+    private static function format_product(array $row, array $category_map = array(), array $variations_by_parent = array()): array {
+        $category_ids = array();
+        if (!empty($row['category_ids'])) {
+            $decoded_ids = json_decode((string) $row['category_ids'], true);
+            if (is_array($decoded_ids)) {
+                $category_ids = array_map('intval', $decoded_ids);
+            }
+        }
+        $category_path = $category_ids ? HMW_Source_API::category_tree($category_ids, $category_map) : array();
+
+        $gallery = array();
+        if (!empty($row['gallery'])) {
+            $decoded_gallery = json_decode((string) $row['gallery'], true);
+            if (is_array($decoded_gallery)) {
+                $gallery = array_values(array_map('strval', $decoded_gallery));
             }
         }
 
-        return array(
+        $formatted = array(
             'source_product_id' => (int) $row['source_product_id'],
             'parent_product_id' => !empty($row['parent_product_id']) ? (int) $row['parent_product_id'] : null,
             'product_type' => (string) $row['product_type'],
             'source_status' => (string) $row['source_status'],
             'sku' => $row['sku'] !== null ? (string) $row['sku'] : null,
             'name' => (string) $row['name'],
+            'short_description' => (string) ($row['short_description'] ?? ''),
             'price' => $row['price'] !== null ? (string) $row['price'] : null,
             'stock_quantity' => $row['stock_quantity'] !== null ? (float) $row['stock_quantity'] : null,
             'stock_status' => (string) $row['stock_status'],
             'manage_stock' => (bool) $row['manage_stock'],
             'image_url' => $row['image_url'] !== null ? (string) $row['image_url'] : null,
+            'gallery' => $gallery,
             'product_url' => $row['product_url'] !== null ? (string) $row['product_url'] : null,
             'category_path' => $category_path,
             'source_modified_gmt' => self::format_db_datetime_as_iso($row['source_modified_gmt']),
             'is_active' => (bool) $row['is_active'],
             'last_synced_at_utc' => (string) $row['last_synced_at'],
             'updated_at_utc' => (string) $row['updated_at'],
+        );
+
+        if ((string) $row['product_type'] === 'variable') {
+            $attributes = array();
+            if (!empty($row['attributes'])) {
+                $decoded_attrs = json_decode((string) $row['attributes'], true);
+                if (is_array($decoded_attrs)) {
+                    $attributes = $decoded_attrs;
+                }
+            }
+            $formatted['attributes'] = $attributes;
+
+            $children = $variations_by_parent[(int) $row['source_product_id']] ?? array();
+            $formatted['variations'] = array_map(static function (array $child): array {
+                $child_attributes = array();
+                if (!empty($child['attributes'])) {
+                    $decoded_child_attrs = json_decode((string) $child['attributes'], true);
+                    if (is_array($decoded_child_attrs)) {
+                        $child_attributes = $decoded_child_attrs;
+                    }
+                }
+                return array(
+                    'variation_id' => (int) $child['source_product_id'],
+                    'attributes' => $child_attributes,
+                    'price' => $child['price'] !== null ? (string) $child['price'] : null,
+                    'stock_quantity' => $child['stock_quantity'] !== null ? (float) $child['stock_quantity'] : null,
+                    'sku' => $child['sku'] !== null ? (string) $child['sku'] : null,
+                );
+            }, $children);
+        }
+
+        return $formatted;
+    }
+
+    public static function products_delta(WP_REST_Request $request): WP_REST_Response {
+        global $wpdb;
+        $table = HMW_DB::products_table();
+
+        $updated_after = self::parse_utc_datetime($request->get_param('updated_after'));
+        if ($updated_after === null) {
+            return new WP_REST_Response(array(
+                'success' => false,
+                'error' => array('code' => 'invalid_updated_after', 'message' => 'updated_after الزامی است و باید تاریخ معتبر ISO 8601 یا Y-m-d H:i:s باشد.'),
+            ), 400);
+        }
+
+        $page = max(1, (int) $request->get_param('page'));
+        $per_page = min(200, max(1, (int) $request->get_param('per_page')));
+        $offset = ($page - 1) * $per_page;
+
+        $total = (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM {$table} WHERE updated_at > %s AND is_active = 1",
+            $updated_after
+        ));
+
+        $changed = $wpdb->get_results($wpdb->prepare(
+            "SELECT source_product_id, parent_product_id, sku, price, stock_quantity FROM {$table} WHERE updated_at > %s AND is_active = 1 ORDER BY source_product_id ASC LIMIT %d OFFSET %d",
+            $updated_after,
+            $per_page,
+            $offset
+        ), ARRAY_A);
+        if (!is_array($changed)) {
+            return new WP_REST_Response(array(
+                'success' => false,
+                'error' => array('code' => 'db_error', 'message' => 'خطا در خواندن دیتابیس.'),
+            ), 500);
+        }
+
+        $items_by_id = array();
+        $base_filled = array();
+        $needed_parent_ids = array();
+
+        foreach ($changed as $row) {
+            $parent_id = !empty($row['parent_product_id']) ? (int) $row['parent_product_id'] : null;
+
+            if ($parent_id === null) {
+                $sid = (int) $row['source_product_id'];
+                $items_by_id[$sid] = array_merge(
+                    $items_by_id[$sid] ?? array(),
+                    self::delta_item($row)
+                );
+                $base_filled[$sid] = true;
+                continue;
+            }
+
+            if (!isset($items_by_id[$parent_id])) {
+                $items_by_id[$parent_id] = array(
+                    'source_product_id' => $parent_id,
+                    'sku' => null,
+                    'price' => null,
+                    'stock_quantity' => null,
+                    'variations' => array(),
+                );
+            }
+            $items_by_id[$parent_id]['variations'][] = array(
+                'variation_id' => (int) $row['source_product_id'],
+                'sku' => $row['sku'] !== null ? (string) $row['sku'] : null,
+                'price' => $row['price'] !== null ? (string) $row['price'] : null,
+                'stock_quantity' => $row['stock_quantity'] !== null ? (float) $row['stock_quantity'] : null,
+            );
+            if (empty($base_filled[$parent_id])) {
+                $needed_parent_ids[] = $parent_id;
+            }
+        }
+
+        $needed_parent_ids = array_values(array_diff(array_unique($needed_parent_ids), array_keys($base_filled)));
+        if ($needed_parent_ids) {
+            $placeholders = implode(',', array_fill(0, count($needed_parent_ids), '%d'));
+            $parent_rows = $wpdb->get_results($wpdb->prepare(
+                "SELECT source_product_id, sku, price, stock_quantity FROM {$table} WHERE source_product_id IN ({$placeholders})",
+                $needed_parent_ids
+            ), ARRAY_A);
+            foreach ((array) $parent_rows as $prow) {
+                $pid = (int) $prow['source_product_id'];
+                if (!isset($items_by_id[$pid])) {
+                    continue;
+                }
+                $items_by_id[$pid]['sku'] = $prow['sku'] !== null ? (string) $prow['sku'] : null;
+                $items_by_id[$pid]['price'] = $prow['price'] !== null ? (string) $prow['price'] : null;
+                $items_by_id[$pid]['stock_quantity'] = $prow['stock_quantity'] !== null ? (float) $prow['stock_quantity'] : null;
+            }
+        }
+
+        $items = array_values($items_by_id);
+        $total_pages = $total > 0 ? (int) ceil($total / $per_page) : 0;
+
+        return new WP_REST_Response(array(
+            'success' => true,
+            'data' => $items,
+            'pagination' => array(
+                'page' => $page,
+                'per_page' => $per_page,
+                'total' => $total,
+                'total_pages' => $total_pages,
+                'has_next' => $page < $total_pages,
+                'has_previous' => $page > 1 && $total > 0,
+            ),
+            'filters' => array(
+                'updated_after' => $updated_after,
+            ),
+            'server' => array(
+                'generated_at_utc' => gmdate('c'),
+                'generated_at_tehran' => wp_date('c', time(), new DateTimeZone(HMW_TIMEZONE)),
+                'plugin_version' => HMW_VERSION,
+            ),
+        ), 200);
+    }
+
+    private static function delta_item(array $row): array {
+        return array(
+            'source_product_id' => (int) $row['source_product_id'],
+            'sku' => $row['sku'] !== null ? (string) $row['sku'] : null,
+            'price' => $row['price'] !== null ? (string) $row['price'] : null,
+            'stock_quantity' => $row['stock_quantity'] !== null ? (float) $row['stock_quantity'] : null,
         );
     }
 }

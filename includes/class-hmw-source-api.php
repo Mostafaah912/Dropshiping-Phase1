@@ -131,7 +131,7 @@ final class HMW_Source_API {
             'per_page' => max(1, min(100, $per_page)),
             'orderby' => 'id',
             'order' => 'asc',
-            '_fields' => 'id,parent,type,status,sku,name,price,stock_quantity,stock_status,manage_stock,images,permalink,categories,date_modified_gmt',
+            '_fields' => 'id,parent,type,status,sku,name,short_description,price,stock_quantity,stock_status,manage_stock,images,permalink,categories,attributes,date_modified_gmt',
         ));
     }
 
@@ -150,7 +150,7 @@ final class HMW_Source_API {
 
     public static function get_product(int $product_id): array {
         return self::request('products/' . $product_id, array(
-            '_fields' => 'id,parent,type,status,sku,name,price,stock_quantity,stock_status,manage_stock,images,permalink,categories,date_modified_gmt',
+            '_fields' => 'id,parent,type,status,sku,name,short_description,price,stock_quantity,stock_status,manage_stock,images,permalink,categories,attributes,date_modified_gmt',
         ));
     }
 
@@ -216,5 +216,44 @@ final class HMW_Source_API {
         }
         $paths = array_values(array_unique($paths));
         return $paths ? wp_json_encode($paths, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) : '';
+    }
+
+    /**
+     * آرایه‌ی مسطح [{id, name, parent_id}] از ریشه تا برگ برای همه‌ی دسته‌های
+     * یک محصول، بدون تکرار (برای خروجی REST؛ جدا از category_path() که فقط
+     * برای ذخیره‌ی رشته‌ی نام‌محور استفاده می‌شود).
+     */
+    public static function category_tree(array $category_ids, array $map): array {
+        $result = array();
+        $seen = array();
+        foreach ($category_ids as $category_id) {
+            $current = (int) $category_id;
+            $chain = array();
+            $visited = array();
+            $depth = 0;
+            while ($current > 0 && isset($map[$current]) && $depth < 20) {
+                if (isset($visited[$current])) {
+                    break;
+                }
+                $visited[$current] = true;
+                $chain[] = $current;
+                $current = (int) ($map[$current]['parent'] ?? 0);
+                $depth++;
+            }
+            $chain = array_reverse($chain);
+            foreach ($chain as $category_node_id) {
+                if (isset($seen[$category_node_id])) {
+                    continue;
+                }
+                $seen[$category_node_id] = true;
+                $parent_id = (int) ($map[$category_node_id]['parent'] ?? 0);
+                $result[] = array(
+                    'id' => $category_node_id,
+                    'name' => (string) ($map[$category_node_id]['name'] ?? ''),
+                    'parent_id' => $parent_id > 0 ? $parent_id : null,
+                );
+            }
+        }
+        return $result;
     }
 }

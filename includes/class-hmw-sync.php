@@ -335,6 +335,28 @@ final class HMW_Sync {
         }
 
         $category_path = $category_ids ? HMW_Source_API::category_path($category_ids, $category_map) : '';
+
+        $gallery = array();
+        if (!empty($product['images']) && is_array($product['images'])) {
+            foreach (array_slice($product['images'], 1) as $image) {
+                if (!empty($image['src'])) {
+                    $gallery[] = (string) $image['src'];
+                }
+            }
+        }
+
+        $attributes = array();
+        if (!empty($product['attributes']) && is_array($product['attributes'])) {
+            foreach ($product['attributes'] as $attribute) {
+                $attributes[] = array(
+                    'name' => (string) ($attribute['name'] ?? ''),
+                    'options' => isset($attribute['options']) && is_array($attribute['options'])
+                        ? array_values(array_map('strval', $attribute['options']))
+                        : array(),
+                );
+            }
+        }
+
         return array(
             'source_product_id' => (int) ($product['id'] ?? 0),
             'parent_product_id' => !empty($product['parent']) ? (int) $product['parent'] : 0,
@@ -349,6 +371,10 @@ final class HMW_Sync {
             'image_url' => self::product_image_url($product, $parent),
             'product_url' => !empty($product['permalink']) ? (string) $product['permalink'] : null,
             'category_path' => $category_path,
+            'short_description' => (string) ($product['short_description'] ?? ''),
+            'gallery' => $gallery ? wp_json_encode($gallery, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) : '',
+            'category_ids' => $category_ids ? wp_json_encode(array_values(array_unique($category_ids))) : '',
+            'attributes' => $attributes ? wp_json_encode($attributes, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) : '',
             'source_modified_gmt' => self::normalize_gmt($product['date_modified_gmt'] ?? null),
             'is_active' => (($product['status'] ?? 'publish') === 'publish') ? 1 : 0,
             'run_uuid' => $run_uuid,
@@ -361,6 +387,17 @@ final class HMW_Sync {
         $variation['name'] = self::variation_name($parent, $variation);
         $variation['permalink'] = $variation['permalink'] ?? ($parent['product_url'] ?? null);
         $parent_category_path = (string) ($parent['category_path'] ?? '');
+
+        $attributes = array();
+        if (!empty($variation['attributes']) && is_array($variation['attributes'])) {
+            foreach ($variation['attributes'] as $attribute) {
+                $attributes[] = array(
+                    'name' => (string) ($attribute['name'] ?? ''),
+                    'option' => (string) ($attribute['option'] ?? ''),
+                );
+            }
+        }
+
         return array(
             'source_product_id' => (int) ($variation['id'] ?? 0),
             'parent_product_id' => (int) ($variation['parent'] ?? 0),
@@ -375,6 +412,7 @@ final class HMW_Sync {
             'image_url' => self::product_image_url($variation, $parent),
             'product_url' => !empty($variation['permalink']) ? (string) $variation['permalink'] : (string) ($parent['product_url'] ?? ''),
             'category_path' => $parent_category_path,
+            'attributes' => $attributes ? wp_json_encode($attributes, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) : '',
             'source_modified_gmt' => self::normalize_gmt($variation['date_modified_gmt'] ?? null),
             'is_active' => (($variation['status'] ?? 'publish') === 'publish') ? 1 : 0,
             'run_uuid' => $run_uuid,
@@ -419,6 +457,11 @@ final class HMW_Sync {
         }
         $ts = strtotime((string) $value);
         return $ts === false ? null : gmdate('Y-m-d H:i:s', $ts);
+    }
+
+    public static function get_cached_category_map(): array {
+        $cached = get_option(self::CATEGORY_OPTION, array());
+        return is_array($cached) ? $cached : array();
     }
 
     private static function get_category_map(): array {

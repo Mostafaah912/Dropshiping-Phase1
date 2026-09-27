@@ -414,17 +414,20 @@ final class HCI_Products {
                     img.src = url;
                     wrap.appendChild(img);
 
+                    const radioLabel = document.createElement('label');
+                    radioLabel.style.cssText = 'display:block;font-size:11px;cursor:pointer';
                     const radio = document.createElement('input');
                     radio.type = 'radio';
                     radio.name = 'hci-featured';
-                    radio.title = 'انتخاب به‌عنوان تصویر اصلی';
                     radio.checked = (url === modalState.featured_image);
                     radio.addEventListener('change', function () {
                         modalState.featured_image = url;
                         renderGallery();
                     });
+                    radioLabel.appendChild(radio);
+                    radioLabel.appendChild(document.createTextNode(' تصویر اصلی'));
                     wrap.appendChild(document.createElement('br'));
-                    wrap.appendChild(radio);
+                    wrap.appendChild(radioLabel);
 
                     const removeBtn = document.createElement('button');
                     removeBtn.type = 'button';

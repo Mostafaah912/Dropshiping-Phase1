@@ -36,6 +36,20 @@ function delete_option(string $name): bool {
     return true;
 }
 
+function set_transient(string $key, $value, int $expiration = 0): bool {
+    $GLOBALS['__test_options']['_transient_' . $key] = $value;
+    return true;
+}
+
+function get_transient(string $key) {
+    return $GLOBALS['__test_options']['_transient_' . $key] ?? false;
+}
+
+function delete_transient(string $key): bool {
+    unset($GLOBALS['__test_options']['_transient_' . $key]);
+    return true;
+}
+
 function wp_json_encode($data, int $options = 0) {
     return json_encode($data, $options);
 }
@@ -99,6 +113,32 @@ function rest_url(string $path = ''): string {
     return 'https://example-test-site.invalid/wp-json/' . ltrim($path, '/');
 }
 
+/**
+ * پیاده‌سازی وفادار add_query_arg(): چه URL ورودی از قبل یک query string
+ * داشته باشد (مثل حالت Plain Permalinks: '?rest_route=/hmw/v1') چه نداشته
+ * باشد (Pretty Permalinks)، پارامترهای جدید را با merge درست اضافه می‌کند —
+ * برخلاف ساخت دستی با یک '?' اضافه که در همان حالت اول کوئری‌استرینگ را
+ * خراب می‌کرد (باگ واقعی HCI_Source_Client::fetch_products_page()).
+ */
+function add_query_arg(...$args): string {
+    if (count($args) === 2 && is_array($args[0])) {
+        [$params, $url] = $args;
+    } elseif (count($args) === 3) {
+        [$key, $value, $url] = $args;
+        $params = array($key => $value);
+    } else {
+        throw new InvalidArgumentException('Unsupported add_query_arg() stub signature');
+    }
+
+    $parts = parse_url((string) $url);
+    parse_str($parts['query'] ?? '', $existing);
+    $merged = array_merge($existing, $params);
+
+    $base = ($parts['scheme'] ?? '') . '://' . ($parts['host'] ?? '') . ($parts['path'] ?? '');
+    $query = http_build_query($merged);
+    return $query !== '' ? $base . '?' . $query : $base;
+}
+
 // --- HTTP API (فقط برای HCI_Source_Client::test_connection) ---------------
 
 function is_wp_error($thing): bool {
@@ -106,6 +146,7 @@ function is_wp_error($thing): bool {
 }
 
 function wp_remote_get(string $url, array $args = array()) {
+    $GLOBALS['__test_last_requested_urls'][] = $url;
     // پاسخ توسط هر تست، از طریق $GLOBALS['__stub_http_response'] تزریق می‌شود.
     return $GLOBALS['__stub_http_response'] ?? array(
         'response' => array('code' => 0, 'message' => ''),

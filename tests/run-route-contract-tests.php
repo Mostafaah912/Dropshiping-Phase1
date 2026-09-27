@@ -60,15 +60,19 @@ if ($healthRoutes) {
 test_section('۳ — قرارداد مسیر بین HCI_Source_Client (کلاینت) و HMW_REST_API (سرور)');
 
 $clientSource = file_get_contents(HCI_REPO_ROOT . '/includes/class-hci-source-client.php');
-preg_match("/rtrim\\(\\\$api_url,\\s*'\\/'\\)\\s*\\.\\s*'(\\/[a-z_\\/]+)'/", $clientSource, $matches);
-$clientRequestedPath = $matches[1] ?? null;
+preg_match_all("/rtrim\\(\\\$api_url,\\s*'\\/'\\)\\s*\\.\\s*'(\\/[a-z_\\/]+)'/", $clientSource, $allMatches);
+$clientRequestedPaths = $allMatches[1] ?? array();
 
-test_evidence('مسیری که کلاینت واقعاً درخواست می‌کند (استخراج‌شده از سورس واقعی، نه فرض دستی)', $clientRequestedPath);
+test_evidence('همه مسیرهایی که کلاینت واقعاً می‌سازد (استخراج‌شده از سورس واقعی، نه فرض دستی)', $clientRequestedPaths);
 
-test_assert($clientRequestedPath !== null, 'الگوی ساخت URL در HCI_Source_Client پیدا و پارس شد');
+test_assert(!empty($clientRequestedPaths), 'حداقل یک الگوی ساخت URL در HCI_Source_Client پیدا و پارس شد');
 test_assert(
-    $clientRequestedPath === '/health',
-    'مسیری که کلاینت درخواست می‌کند (' . ($clientRequestedPath ?? 'NULL') . ') دقیقاً با مسیر ثبت‌شده سمت سرور (/health) یکی است'
+    in_array('/health', $clientRequestedPaths, true),
+    'کلاینت یک درخواست به /health می‌سازد که دقیقاً با مسیر ثبت‌شده سمت سرور (/health) یکی است'
+);
+test_assert(
+    in_array('/products', $clientRequestedPaths, true),
+    'کلاینت یک درخواست به /products هم می‌سازد که با namespace سمت سرور سازگار است'
 );
 
 // =============================================================================
@@ -89,9 +93,65 @@ test_assert(
 );
 
 // =============================================================================
-// ۵ (Bonus) — HMW_REST_API::self_test() هر دو حالت را درست تشخیص می‌دهد
+// ۵ — رگرسیون واقعی: HCI_Source_Client::get_all_products() باید هم روی
+//    Pretty Permalinks (.../wp-json/hmw/v1) و هم روی Plain Permalinks
+//    (.../index.php?rest_route=/hmw/v1 — دقیقاً همان چیزی که در دیباگ واقعی
+//    با کاربر دیده شد) درخواست /products درستی بسازد. قبلاً کد با
+//    "'/products?' . http_build_query(...)" این را دستی می‌ساخت که روی حالت
+//    دوم یک '?' اضافه تولید می‌کرد و rest_route را با '?page=1' آلوده می‌کرد.
 // =============================================================================
-test_section('۵ (Bonus) — HMW_REST_API::self_test(): تشخیص rest_no_route در برابر route سالم');
+test_section('۵ — HCI_Source_Client روی هر دو سبک Permalinks (Pretty و Plain) درست کار می‌کند');
+
+function hci_test_products_page_response(): array {
+    return array(
+        'response' => array('code' => 200, 'message' => 'OK'),
+        'body' => json_encode(array(
+            'success' => true,
+            'data' => array(),
+            'pagination' => array('total_pages' => 1),
+        )),
+    );
+}
+
+// حالت Pretty Permalinks
+update_option('hci_api_url', 'https://pretty-site.invalid/wp-json/hmw/v1');
+update_option('hci_api_key', 'test-key');
+delete_transient('hci_products_cache');
+$GLOBALS['__test_last_requested_urls'] = array();
+$GLOBALS['__stub_http_response'] = hci_test_products_page_response();
+HCI_Source_Client::get_all_products(true);
+
+$prettyUrl = $GLOBALS['__test_last_requested_urls'][0] ?? '';
+test_evidence('URL واقعی درخواست‌شده روی Pretty Permalinks', $prettyUrl);
+parse_str((string) parse_url($prettyUrl, PHP_URL_QUERY), $prettyQuery);
+test_assert(
+    ($prettyQuery['page'] ?? null) === '1' && ($prettyQuery['per_page'] ?? null) === '100',
+    'روی Pretty Permalinks، page/per_page به‌درستی پارامترهای جدا هستند'
+);
+
+// حالت Plain Permalinks — دقیقاً همان چیزی که کاربر واقعی در wholesale.heymode.ir داشت
+update_option('hci_api_url', 'https://plain-site.invalid/index.php?rest_route=/hmw/v1');
+delete_transient('hci_products_cache');
+$GLOBALS['__test_last_requested_urls'] = array();
+$GLOBALS['__stub_http_response'] = hci_test_products_page_response();
+HCI_Source_Client::get_all_products(true);
+
+$plainUrl = $GLOBALS['__test_last_requested_urls'][0] ?? '';
+test_evidence('URL واقعی درخواست‌شده روی Plain Permalinks (?rest_route=)', $plainUrl);
+parse_str((string) parse_url($plainUrl, PHP_URL_QUERY), $plainQuery);
+test_assert(
+    ($plainQuery['rest_route'] ?? null) === '/hmw/v1/products',
+    'rest_route دقیقاً "/hmw/v1/products" است — نه آلوده به "?page=1" (باگی که با کاربر واقعی پیدا شد)'
+);
+test_assert(
+    ($plainQuery['page'] ?? null) === '1' && ($plainQuery['per_page'] ?? null) === '100',
+    'روی Plain Permalinks هم، page/per_page پارامترهای کاملاً جدا و سالم هستند'
+);
+
+// =============================================================================
+// ۶ (Bonus) — HMW_REST_API::self_test() هر دو حالت را درست تشخیص می‌دهد
+// =============================================================================
+test_section('۶ (Bonus) — HMW_REST_API::self_test(): تشخیص rest_no_route در برابر route سالم');
 
 $GLOBALS['__stub_http_response'] = array(
     'response' => array('code' => 404, 'message' => 'Not Found'),

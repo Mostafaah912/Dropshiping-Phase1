@@ -50,11 +50,18 @@ final class HCI_Source_Client {
     }
 
     private static function fetch_products_page(string $api_url, string $api_key, int $page): array {
-        $url = rtrim($api_url, '/') . '/products?' . http_build_query(array(
+        // add_query_arg() به‌جای ساخت دستی '?'+http_build_query لازم است: وقتی
+        // Permalinks سایت منبع روی Plain باشد، rest_url() آدرسی مثل
+        // '.../index.php?rest_route=/hmw/v1' برمی‌گرداند که خودش از قبل یک '?'
+        // دارد؛ اضافه‌کردن یک '?' دیگر بعد از '/products' باعث می‌شد کوئری‌استرینگ
+        // به‌اشتباه پارس شود (rest_route با '?page=1' آلوده می‌شد و هیچ Route‌ای
+        // مچ نمی‌کرد). add_query_arg() هر دو فرمت (Pretty Permalinks و
+        // ?rest_route=) را درست merge می‌کند.
+        $url = add_query_arg(array(
             'page' => $page,
             'per_page' => 100,
             'include_inactive' => 'false',
-        ));
+        ), rtrim($api_url, '/') . '/products');
         $response = wp_remote_get($url, array(
             'timeout' => 15,
             'headers' => array(

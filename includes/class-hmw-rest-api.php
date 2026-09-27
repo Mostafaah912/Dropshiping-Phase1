@@ -345,6 +345,60 @@ final class HMW_REST_API {
         ), 200);
     }
 
+    /**
+     * درخواست Loopback به Endpoint سلامت خودِ همین سایت (بدون هدر Authorization)
+     * تا بین دو حالت کاملاً متفاوت تشخیص بدهد: «مسیر REST این پلاگین اصلاً
+     * توسط وردپرس شناخته نشده» (rest_no_route — معمولاً یعنی Permalinks بعد
+     * از نصب/آپدیت نیاز به یک‌بار Save دارند، یا یک پلاگین امنیتی/فایروال کل
+     * /wp-json/ را مسدود کرده) در برابر «مسیر سالم است، فقط Auth رد شد»
+     * (۴۰۱/۵۰۳ — یعنی permission_callback واقعاً اجرا شده). rest_url() کاملاً
+     * مستقل از دامنه نصب است، پس این تست روی هر ساب‌دامینی بدون تغییر کار می‌کند.
+     */
+    public static function self_test(): array {
+        $url = rest_url(self::NAMESPACE . '/health');
+        $response = wp_remote_get($url, array('timeout' => 10));
+
+        if (is_wp_error($response)) {
+            return array(
+                'ok' => false,
+                'code' => 'connection_error',
+                'message' => 'درخواست Loopback به REST API همین سایت ناموفق بود: ' . $response->get_error_message(),
+                'url' => $url,
+            );
+        }
+
+        $status = (int) wp_remote_retrieve_response_code($response);
+        $json = json_decode(wp_remote_retrieve_body($response), true);
+
+        if ($status === 404 && is_array($json) && ($json['code'] ?? '') === 'rest_no_route') {
+            return array(
+                'ok' => false,
+                'code' => 'rest_no_route',
+                'message' => 'مسیر REST این پلاگین هنوز توسط وردپرس شناخته نشده. معمولاً یعنی Permalinks نیاز به Flush دارند (Settings ← Permalinks ← Save Changes، بدون تغییر گزینه‌ها)، یا یک پلاگین امنیتی/فایروال کل /wp-json/ را مسدود کرده — ربطی به این پلاگین یا دامنهٔ نصب ندارد.',
+                'url' => $url,
+                'status' => $status,
+            );
+        }
+
+        if (in_array($status, array(200, 401, 503), true)) {
+            return array(
+                'ok' => true,
+                'code' => 'route_ok',
+                'message' => 'مسیر REST این پلاگین سالم است و توسط وردپرس شناخته می‌شود.',
+                'url' => $url,
+                'status' => $status,
+            );
+        }
+
+        return array(
+            'ok' => false,
+            'code' => 'unexpected_status',
+            'message' => sprintf('پاسخ غیرمنتظره از خودِ سایت: HTTP %d.', $status),
+            'url' => $url,
+            'status' => $status,
+        );
+    }
+
     public static function generate_key(): string {
         $raw = 'hmw_' . wp_generate_uuid4() . '_' . bin2hex(random_bytes(24));
         $key = rtrim(strtr(base64_encode($raw), '+/', '-_'), '=');

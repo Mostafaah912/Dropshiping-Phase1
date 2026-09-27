@@ -11,6 +11,7 @@ final class HMW_Admin {
         add_action('admin_post_hmw_generate_api_key', array(__CLASS__, 'handle_generate_api_key'));
         add_action('admin_post_hmw_revoke_api_key', array(__CLASS__, 'handle_revoke_api_key'));
         add_action('admin_post_hmw_save_api_ip_allowlist', array(__CLASS__, 'handle_save_api_ip_allowlist'));
+        add_action('admin_post_hmw_self_test_rest', array(__CLASS__, 'handle_self_test_rest'));
         add_action('wp_ajax_hmw_full_tick', array(__CLASS__, 'ajax_full_tick'));
         add_action('hmw_daily_full_sync', array('HMW_Sync', 'cron_full'));
         add_action('hmw_full_continue', array('HMW_Sync', 'cron_full_continue'));
@@ -201,6 +202,10 @@ final class HMW_Admin {
         $created_at = HMW_REST_API::get_key_created_at();
         $allowlist = HMW_REST_API::get_ip_allowlist();
         $notice = isset($_GET['hmw_api_notice']) ? sanitize_key(wp_unslash($_GET['hmw_api_notice'])) : '';
+        $self_test = get_transient('hmw_self_test_' . get_current_user_id());
+        if ($self_test !== false) {
+            delete_transient('hmw_self_test_' . get_current_user_id());
+        }
         $base = rest_url('hmw/v1');
         ?>
         <div class="wrap">
@@ -229,6 +234,20 @@ final class HMW_Admin {
                     <?php endif; ?>
                 </tbody>
             </table>
+
+            <?php if (is_array($self_test)) : ?>
+                <div class="notice <?php echo !empty($self_test['ok']) ? 'notice-success' : 'notice-error'; ?> is-dismissible" style="padding:12px">
+                    <p><strong>نتیجه بررسی سلامت REST API:</strong> <?php echo esc_html((string) ($self_test['message'] ?? '')); ?></p>
+                    <?php if (!empty($self_test['url'])) : ?><p><code><?php echo esc_html((string) $self_test['url']); ?></code><?php if (isset($self_test['status'])) : ?> — HTTP <?php echo esc_html((string) $self_test['status']); ?><?php endif; ?></p><?php endif; ?>
+                </div>
+            <?php endif; ?>
+
+            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="margin-bottom:22px">
+                <input type="hidden" name="action" value="hmw_self_test_rest">
+                <?php wp_nonce_field('hmw_self_test_rest'); ?>
+                <button type="submit" class="button">بررسی سلامت REST API (خودِ این سایت)</button>
+                <p class="description">یک درخواست Loopback به Endpoint سلامت خودِ همین سایت می‌زند تا مشخص شود آیا مسیر REST این پلاگین اصلاً توسط وردپرس شناخته می‌شود — قبل از این‌که سایت مشتری امتحان کند.</p>
+            </form>
 
             <?php if ($plain_key !== false && is_string($plain_key) && $plain_key !== '') : ?>
                 <div class="notice notice-warning" style="padding:16px">
@@ -296,7 +315,7 @@ final class HMW_Admin {
   "stock_status": "instock",
   "manage_stock": true,
   "image_url": "https://...",
-  "product_url": "https://heymode.ir/product/...",
+  "product_url": "https://...",
   "category_path": [
     "دسته اصلی > دسته فرعی",
     "دسته اصلی"
@@ -341,6 +360,14 @@ final class HMW_Admin {
             $url = add_query_arg('hmw_notice', 'error', $url);
         }
         wp_safe_redirect($url);
+        exit;
+    }
+
+    public static function handle_self_test_rest(): void {
+        self::guard('hmw_self_test_rest');
+        $result = HMW_REST_API::self_test();
+        set_transient('hmw_self_test_' . get_current_user_id(), $result, MINUTE_IN_SECONDS);
+        wp_safe_redirect(add_query_arg(array('page' => 'heymode-wholesale-api'), admin_url('admin.php')));
         exit;
     }
 

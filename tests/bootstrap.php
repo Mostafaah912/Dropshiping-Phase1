@@ -63,6 +63,42 @@ function rest_sanitize_boolean($value): bool {
     return filter_var($value, FILTER_VALIDATE_BOOLEAN);
 }
 
+/**
+ * Recorder-هایی برای add_action/add_filter/register_rest_route — یک موتور
+ * Hook واقعی وردپرس نیستند، فقط هرچه ثبت می‌شود را نگه می‌دارند تا تست بتواند
+ * verify کند «چه چیزی، با چه Namespace/Route‌ای ثبت شد»، بدون نیاز به هسته
+ * وردپرس. do_action_test() برای فراخوانی واقعیِ callbackهای ثبت‌شده است (مثلاً
+ * برای شبیه‌سازی این‌که rest_api_init واقعاً fire شده).
+ */
+$GLOBALS['__test_hooks'] = array();
+$GLOBALS['__test_registered_routes'] = array();
+
+function add_action(string $hook, $callback, int $priority = 10, int $accepted_args = 1): void {
+    $GLOBALS['__test_hooks'][$hook][] = $callback;
+}
+
+function add_filter(string $hook, $callback, int $priority = 10, int $accepted_args = 1): void {
+    $GLOBALS['__test_hooks'][$hook][] = $callback;
+}
+
+function do_action_test(string $hook): void {
+    foreach ($GLOBALS['__test_hooks'][$hook] ?? array() as $callback) {
+        call_user_func($callback);
+    }
+}
+
+function register_rest_route(string $namespace, string $route, $args): void {
+    $GLOBALS['__test_registered_routes'][] = array(
+        'namespace' => $namespace,
+        'route' => $route,
+        'args' => $args,
+    );
+}
+
+function rest_url(string $path = ''): string {
+    return 'https://example-test-site.invalid/wp-json/' . ltrim($path, '/');
+}
+
 // --- HTTP API (فقط برای HCI_Source_Client::test_connection) ---------------
 
 function is_wp_error($thing): bool {

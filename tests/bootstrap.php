@@ -73,6 +73,50 @@ function sanitize_key(string $key): string {
     return strtolower(preg_replace('/[^a-z0-9_\-]/', '', $key) ?? '');
 }
 
+function esc_attr($text): string {
+    return htmlspecialchars((string) $text, ENT_QUOTES, 'UTF-8');
+}
+
+function esc_html($text): string {
+    return htmlspecialchars((string) $text, ENT_QUOTES, 'UTF-8');
+}
+
+function esc_textarea($text): string {
+    return htmlspecialchars((string) $text, ENT_QUOTES, 'UTF-8');
+}
+
+function esc_url($url): string {
+    return (string) $url; // ساده‌شده؛ فقط برای رندر HTML در تست، نه Sanitization واقعی
+}
+
+function esc_html__($text, $domain = 'default') {
+    return $text;
+}
+
+function disabled($value, $compare = true, bool $echo = true): string {
+    $result = ((string) $value === (string) $compare) ? ' disabled="disabled"' : '';
+    if ($echo) {
+        echo $result;
+    }
+    return $result;
+}
+
+function checked($value, $compare = true, bool $echo = true): string {
+    $result = ((string) $value === (string) $compare) ? ' checked="checked"' : '';
+    if ($echo) {
+        echo $result;
+    }
+    return $result;
+}
+
+function selected($value, $compare = true, bool $echo = true): string {
+    $result = ((string) $value === (string) $compare) ? ' selected="selected"' : '';
+    if ($echo) {
+        echo $result;
+    }
+    return $result;
+}
+
 function rest_sanitize_boolean($value): bool {
     return filter_var($value, FILTER_VALIDATE_BOOLEAN);
 }

@@ -248,8 +248,12 @@ final class HCI_Products {
         $image = $item['image_url'] ?? '';
         $name = (string) ($item['name'] ?? '');
         $price = $item['price'] !== null && $item['price'] !== '' ? $item['price'] : '-';
+        $is_variable = ($item['product_type'] ?? '') === 'variable';
         ?>
         <div class="hci-card" data-id="<?php echo esc_attr((string) $id); ?>">
+            <?php if ($is_variable) : ?>
+                <div class="hci-card-badge-variable">متغیر</div>
+            <?php endif; ?>
             <div class="hci-card-image">
                 <?php if ($image) : ?>
                     <img src="<?php echo esc_url($image); ?>" alt="">
@@ -302,6 +306,15 @@ final class HCI_Products {
                         <tr><th>سلسله دسته‌بندی</th><td id="hci-modal-categories"></td></tr>
                         <tr><th>قیمت محاسبه‌شده</th><td id="hci-modal-price"></td></tr>
                         <tr><th>وضعیت انبار</th><td id="hci-modal-stock"></td></tr>
+                        <tr id="hci-modal-variations-row" style="display:none">
+                            <th>تنوع‌ها (Variations)</th>
+                            <td>
+                                <table class="widefat striped hci-variations-table">
+                                    <thead><tr><th>ترکیب</th><th>قیمت خام</th><th>موجودی</th></tr></thead>
+                                    <tbody id="hci-modal-variations-tbody"></tbody>
+                                </table>
+                            </td>
+                        </tr>
                     </tbody>
                 </table>
                 <p>
@@ -320,6 +333,8 @@ final class HCI_Products {
             .hci-card-price { color:#2271b1; margin-bottom:8px; }
             .hci-card-actions { display:flex; justify-content:space-between; align-items:center; gap:6px; flex-wrap:wrap; }
             .hci-card-badge { position:absolute; top:8px; left:8px; background:#d63638; color:#fff; font-size:11px; padding:2px 6px; border-radius:3px; }
+            .hci-card-badge-variable { position:absolute; top:8px; right:8px; background:#2271b1; color:#fff; font-size:11px; padding:2px 6px; border-radius:3px; z-index:2; }
+            .hci-variations-table th, .hci-variations-table td { padding:4px 8px; font-size:12px; }
             .hci-modal-overlay { position:fixed; inset:0; background:rgba(0,0,0,.5); z-index:100000; display:flex; align-items:center; justify-content:center; }
             .hci-modal { background:#fff; padding:24px; max-width:640px; width:92%; max-height:85vh; overflow:auto; border-radius:4px; }
             .hci-gallery-item { display:inline-block; position:relative; margin:4px; text-align:center; }
@@ -329,21 +344,51 @@ final class HCI_Products {
         <?php
     }
 
+    /**
+     * یک آیتم محصول (خروجی /products مبدا) را به شکل مختصر برای JSON تعبیه‌شده
+     * در صفحه گرید تبدیل می‌کند. برای product_type=variable، آرایه‌ی variations
+     * (که خودِ API مبدا از قبل با {variation_id, attributes, price,
+     * stock_quantity, sku} برمی‌گرداند) هم منتقل می‌شود تا هم مودال «بفروشش»
+     * و هم جدول بازبینی (بعد از عبور از localStorage/selection_json) به آن
+     * دسترسی داشته باشند؛ برای simple این آرایه همیشه خالی است.
+     */
+    private static function build_product_json_entry(array $item): array {
+        $id = (int) ($item['source_product_id'] ?? 0);
+        $category_names = array_map(static fn ($n) => (string) ($n['name'] ?? ''), (array) ($item['category_path'] ?? array()));
+        $product_type = (string) ($item['product_type'] ?? 'simple');
+
+        $variations = array();
+        if ($product_type === 'variable') {
+            foreach ((array) ($item['variations'] ?? array()) as $variation) {
+                $variations[] = array(
+                    'variation_id' => (int) ($variation['variation_id'] ?? 0),
+                    'attributes' => (array) ($variation['attributes'] ?? array()),
+                    'price' => $variation['price'] ?? null,
+                    'stock_quantity' => $variation['stock_quantity'] ?? null,
+                    'sku' => $variation['sku'] ?? null,
+                );
+            }
+        }
+
+        return array(
+            'id' => $id,
+            'name' => (string) ($item['name'] ?? ''),
+            'short_description' => (string) ($item['short_description'] ?? ''),
+            'price' => $item['price'],
+            'stock_status' => (string) ($item['stock_status'] ?? ''),
+            'category_names' => $category_names,
+            'image_url' => $item['image_url'],
+            'gallery' => (array) ($item['gallery'] ?? array()),
+            'product_type' => $product_type,
+            'variations' => $variations,
+        );
+    }
+
     private static function render_grid_script(array $page_items): void {
         $products_json = array();
         foreach ($page_items as $item) {
             $id = (int) ($item['source_product_id'] ?? 0);
-            $category_names = array_map(static fn ($n) => (string) ($n['name'] ?? ''), (array) ($item['category_path'] ?? array()));
-            $products_json[$id] = array(
-                'id' => $id,
-                'name' => (string) ($item['name'] ?? ''),
-                'short_description' => (string) ($item['short_description'] ?? ''),
-                'price' => $item['price'],
-                'stock_status' => (string) ($item['stock_status'] ?? ''),
-                'category_names' => $category_names,
-                'image_url' => $item['image_url'],
-                'gallery' => (array) ($item['gallery'] ?? array()),
-            );
+            $products_json[$id] = self::build_product_json_entry($item);
         }
         ?>
         <script>
@@ -372,6 +417,8 @@ final class HCI_Products {
                     category_names: product.category_names,
                     featured_image: product.image_url,
                     images: (product.gallery || []).slice(),
+                    product_type: product.product_type,
+                    variations: product.variations || [],
                 };
             }
 
@@ -461,6 +508,40 @@ final class HCI_Products {
                 });
             }
 
+            function renderVariations(product) {
+                const row = document.getElementById('hci-modal-variations-row');
+                const tbody = document.getElementById('hci-modal-variations-tbody');
+                tbody.innerHTML = '';
+
+                if (product.product_type !== 'variable' || !product.variations || !product.variations.length) {
+                    row.style.display = 'none';
+                    return;
+                }
+                row.style.display = '';
+
+                product.variations.forEach(function (v) {
+                    const tr = document.createElement('tr');
+
+                    const attrText = (v.attributes || []).map(function (a) {
+                        return (a.name || '') + ': ' + (a.option || '');
+                    }).join('، ') || '-';
+
+                    const tdAttr = document.createElement('td');
+                    tdAttr.textContent = attrText;
+
+                    const tdPrice = document.createElement('td');
+                    tdPrice.textContent = (v.price !== null && v.price !== undefined && v.price !== '') ? v.price : '-';
+
+                    const tdStock = document.createElement('td');
+                    tdStock.textContent = (v.stock_quantity !== null && v.stock_quantity !== undefined) ? v.stock_quantity : '-';
+
+                    tr.appendChild(tdAttr);
+                    tr.appendChild(tdPrice);
+                    tr.appendChild(tdStock);
+                    tbody.appendChild(tr);
+                });
+            }
+
             document.querySelectorAll('.hci-sell-btn').forEach(function (btn) {
                 btn.addEventListener('click', function () {
                     const id = btn.getAttribute('data-id');
@@ -475,6 +556,7 @@ final class HCI_Products {
                     document.getElementById('hci-modal-price').textContent = (product.price !== null ? product.price : '-') + ' (خام؛ فرمول نهایی در جدول بازبینی محاسبه می‌شود)';
                     document.getElementById('hci-modal-stock').textContent = product.stock_status === 'instock' ? 'موجود' : 'ناموجود';
                     renderGallery();
+                    renderVariations(product);
                     overlay.style.display = 'flex';
                 });
             });
@@ -543,6 +625,57 @@ final class HCI_Products {
     // صفحه بازبینی (جدول اکسل‌مانند) — بدون ساخت واقعی محصول در ووکامرس
     // =========================================================================
 
+    /**
+     * برای محصول simple یک عدد قیمت نهایی (فرمول‌شده) برمی‌گرداند. برای
+     * variable، چون هر Variation قیمت خام خودش را دارد، به‌جای یک عدد
+     * گمراه‌کننده، بازه‌ی (کمترین تا بیشترین قیمتِ فرمول‌شده) را برمی‌گرداند و
+     * ریز قیمت هر Variation را در 'title' (Tooltip بومی مرورگر، بدون نیاز به
+     * JS اضافه) می‌گذارد — کم‌هزینه‌ترین راه سازگار با ساختار فعلی جدول.
+     */
+    private static function compute_price_display(array $entry): array {
+        $is_variable = ($entry['product_type'] ?? 'simple') === 'variable';
+        $variations = (array) ($entry['variations'] ?? array());
+
+        if ($is_variable && $variations) {
+            $final_prices = array();
+            $tooltip_lines = array();
+            foreach ($variations as $variation) {
+                $raw = $variation['price'] ?? null;
+                if ($raw === null || $raw === '') {
+                    continue;
+                }
+                $final = HCI_Pricing::resolve_price((float) $raw);
+                $final_prices[] = $final;
+                $attr_text = implode('، ', array_map(
+                    static fn (array $a): string => (string) ($a['name'] ?? '') . ': ' . (string) ($a['option'] ?? ''),
+                    (array) ($variation['attributes'] ?? array())
+                ));
+                $label = $attr_text !== '' ? $attr_text : ('Variation #' . (int) ($variation['variation_id'] ?? 0));
+                $tooltip_lines[] = $label . ' = ' . number_format($final, 0);
+            }
+
+            if ($final_prices) {
+                $min = min($final_prices);
+                $max = max($final_prices);
+                return array(
+                    'display' => ($min === $max) ? number_format($min, 0) : number_format($min, 0) . ' – ' . number_format($max, 0),
+                    'title' => implode("\n", $tooltip_lines),
+                    'is_range' => $min !== $max,
+                );
+            }
+
+            return array('display' => '-', 'title' => '', 'is_range' => false);
+        }
+
+        $raw_price = $entry['price'] ?? null;
+        $final_price = ($raw_price !== null && $raw_price !== '') ? HCI_Pricing::resolve_price((float) $raw_price) : null;
+        return array(
+            'display' => $final_price !== null ? number_format($final_price, 0) : '-',
+            'title' => '',
+            'is_range' => false,
+        );
+    }
+
     public static function render_review_page(): void {
         self::guard();
 
@@ -569,15 +702,17 @@ final class HCI_Products {
                     $source_product_id = (int) $source_product_id;
                     $source_sku = (string) ($entry['source_sku'] ?? '');
                     $is_duplicate = isset($imported_ids[$source_product_id]) || ($source_sku !== '' && isset($imported_skus[$source_sku]));
-                    $raw_price = $entry['price'] ?? null;
-                    $final_price = ($raw_price !== null && $raw_price !== '') ? HCI_Pricing::resolve_price((float) $raw_price) : null;
+                    $price_display = self::compute_price_display($entry);
                     ?>
                     <tr data-id="<?php echo esc_attr((string) $source_product_id); ?>">
                         <td><?php echo esc_html((string) $row_number++); ?></td>
                         <td><?php if (!empty($entry['featured_image'])) : ?><img src="<?php echo esc_url($entry['featured_image']); ?>" style="width:48px;height:48px;object-fit:cover"><?php endif; ?></td>
                         <td><input type="text" value="<?php echo esc_attr((string) ($entry['name'] ?? '')); ?>" style="width:100%"></td>
                         <td><?php echo esc_html(implode(' > ', (array) ($entry['category_names'] ?? array()))); ?></td>
-                        <td><?php echo $final_price !== null ? esc_html(number_format($final_price, 0)) : '-'; ?></td>
+                        <td<?php echo $price_display['title'] !== '' ? ' title="' . esc_attr($price_display['title']) . '"' : ''; ?>>
+                            <?php echo esc_html($price_display['display']); ?>
+                            <?php if ($price_display['is_range']) : ?><br><span style="font-size:10px;color:#787c82">(چند قیمتی — Hover کنید)</span><?php endif; ?>
+                        </td>
                         <td><textarea rows="2" style="width:100%"><?php echo esc_textarea((string) ($entry['short_description'] ?? '')); ?></textarea></td>
                         <td>
                             <?php if ($is_duplicate) : ?>

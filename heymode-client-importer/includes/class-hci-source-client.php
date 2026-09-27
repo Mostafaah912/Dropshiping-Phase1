@@ -6,6 +6,27 @@ final class HCI_Source_Client {
     private const PRODUCTS_CACHE_TRANSIENT = 'hci_products_cache';
     private const PRODUCTS_CACHE_TTL = 10 * MINUTE_IN_SECONDS;
     private const MAX_PAGES = 30; // سقف ایمنی (≈۳۰۰۰ محصول) برای جلوگیری از حلقه بی‌پایان روی یک منبع خراب
+    private const PARTIAL_STATE_TRANSIENT = 'hci_products_partial_state';
+    private const PARTIAL_STATE_TTL = 30 * MINUTE_IN_SECONDS;
+
+    // Rate Limit سمت منبع (class-hmw-rest-api.php: RATE_LIMIT=120 درخواست در
+    // RATE_WINDOW=60 ثانیه در هر IP) یعنی نرخ پایدار مجاز حداکثر ۲ درخواست در
+    // ثانیه است. ۶۰۰ میلی‌ثانیه تاخیر بین صفحات ≈ ۱٫۶۷ درخواست در ثانیه —
+    // زیر سقف با حاشیه امن، بدون این‌که واکشی ۲۲۰۷ محصول (۲۳ صفحه) را
+    // غیرقابل‌تحمل کند (~۱۴ ثانیه تاخیر جمعی).
+    private static int $page_delay_us = 600000;
+    // اگر با وجود تاخیر باز هم ۴۲۹ گرفتیم، طبق مستندات بین ۲ تا ۵ ثانیه صبر و
+    // یک‌بار Retry می‌کنیم؛ اگر بازهم ۴۲۹ شد، همان‌جا متوقف می‌شویم (نه Retry بی‌پایان).
+    private static int $rate_limit_retry_delay_s = 3;
+
+    /**
+     * فقط برای تست خودکار: تاخیرهای واقعی را کوتاه/صفر می‌کند تا اجرای تست
+     * چند ثانیه معطل sleep() واقعی نشود. در کد Production هرگز صدا زده نمی‌شود.
+     */
+    public static function configure_delays_for_tests(int $page_delay_us, int $rate_limit_retry_delay_s): void {
+        self::$page_delay_us = $page_delay_us;
+        self::$rate_limit_retry_delay_s = $rate_limit_retry_delay_s;
+    }
 
     /**
      * کل محصولات فعال منبع را برمی‌گرداند. برخلاف /products که فیلتر/مرتب‌سازی
@@ -27,26 +48,97 @@ final class HCI_Source_Client {
             return array('success' => false, 'items' => array(), 'message' => 'API URL و API Key باید هر دو تنظیم شوند.');
         }
 
-        $items = array();
-        $page = 1;
-        $total_pages = 1;
-        do {
-            $result = self::fetch_products_page($api_url, $api_key, $page);
+        // اگر تلاش قبلی به‌خاطر Rate Limit ناقص مانده، از همان صفحه ادامه
+        // می‌دهیم (نه از صفر) تا محصولاتی که قبلاً موفق واکشی شده بودند دور
+        // ریخته نشوند.
+        $partial = get_transient(self::PARTIAL_STATE_TRANSIENT);
+        if (is_array($partial) && isset($partial['items'], $partial['next_page'])) {
+            $items = $partial['items'];
+            $page = (int) $partial['next_page'];
+            $total_pages = (int) ($partial['total_pages'] ?? $page);
+            $total_count = $partial['total_count'] ?? null;
+        } else {
+            $items = array();
+            $page = 1;
+            $total_pages = 1;
+            $total_count = null;
+        }
+
+        while ($page <= $total_pages && $page <= self::MAX_PAGES) {
+            $result = self::fetch_products_page_with_retry($api_url, $api_key, $page);
+
             if (!$result['success']) {
-                return array('success' => false, 'items' => array(), 'message' => $result['message']);
+                if (!empty($result['rate_limited'])) {
+                    set_transient(self::PARTIAL_STATE_TRANSIENT, array(
+                        'items' => $items,
+                        'next_page' => $page,
+                        'total_pages' => $total_pages,
+                        'total_count' => $total_count,
+                    ), self::PARTIAL_STATE_TTL);
+
+                    return array(
+                        'success' => false,
+                        'items' => $items,
+                        'partial' => true,
+                        'total_pages' => $total_pages,
+                        'total_count' => $total_count,
+                        'message' => sprintf(
+                            '%s محصول%s دریافت شد، اما به‌خاطر محدودیت نرخ درخواست (Rate Limit) سرور منبع متوقف شد. دوباره روی «بروزرسانی از منبع» بزنید تا از همین‌جا ادامه یابد.',
+                            number_format(count($items)),
+                            $total_count !== null ? ' از مجموع ' . number_format((int) $total_count) : ''
+                        ),
+                    );
+                }
+
+                // شکست غیر از Rate Limit (مثلاً خطای شبکه/Auth): پیشرفت جزئی
+                // را هم نگه می‌داریم تا کاربر همه‌چیز را از دست ندهد، اما
+                // success=false را صادق گزارش می‌کنیم.
+                set_transient(self::PARTIAL_STATE_TRANSIENT, array(
+                    'items' => $items,
+                    'next_page' => $page,
+                    'total_pages' => $total_pages,
+                    'total_count' => $total_count,
+                ), self::PARTIAL_STATE_TTL);
+
+                return array('success' => false, 'items' => $items, 'partial' => !empty($items), 'message' => $result['message']);
             }
+
             $page_items = is_array($result['data']) ? $result['data'] : array();
             $items = array_merge($items, $page_items);
             $total_pages = (int) ($result['pagination']['total_pages'] ?? $page);
+            $total_count = $result['pagination']['total'] ?? $total_count;
             $page++;
-        } while ($page <= $total_pages && $page <= self::MAX_PAGES && !empty($page_items));
 
+            if (empty($page_items)) {
+                break;
+            }
+
+            if ($page <= $total_pages && $page <= self::MAX_PAGES) {
+                usleep(self::$page_delay_us);
+            }
+        }
+
+        delete_transient(self::PARTIAL_STATE_TRANSIENT);
         set_transient(self::PRODUCTS_CACHE_TRANSIENT, $items, self::PRODUCTS_CACHE_TTL);
-        return array('success' => true, 'items' => $items, 'from_cache' => false);
+        return array('success' => true, 'items' => $items, 'total_count' => $total_count, 'from_cache' => false);
     }
 
     public static function clear_products_cache(): void {
         delete_transient(self::PRODUCTS_CACHE_TRANSIENT);
+    }
+
+    private static function fetch_products_page_with_retry(string $api_url, string $api_key, int $page): array {
+        $result = self::fetch_products_page($api_url, $api_key, $page);
+        if (($result['status'] ?? null) !== 429) {
+            return $result;
+        }
+
+        sleep(self::$rate_limit_retry_delay_s);
+        $retry = self::fetch_products_page($api_url, $api_key, $page);
+        if (($retry['status'] ?? null) === 429) {
+            $retry['rate_limited'] = true;
+        }
+        return $retry;
     }
 
     private static function fetch_products_page(string $api_url, string $api_key, int $page): array {
@@ -71,7 +163,7 @@ final class HCI_Source_Client {
         ));
 
         if (is_wp_error($response)) {
-            return array('success' => false, 'message' => 'خطا در ارتباط با سرور منبع: ' . $response->get_error_message());
+            return array('success' => false, 'message' => 'خطا در ارتباط با سرور منبع: ' . $response->get_error_message(), 'status' => 0);
         }
 
         $status = (int) wp_remote_retrieve_response_code($response);
@@ -82,6 +174,7 @@ final class HCI_Source_Client {
             return array(
                 'success' => false,
                 'message' => sprintf('پاسخ سرور منبع: HTTP %d%s', $status, self::extract_error_message($json, $response)),
+                'status' => $status,
             );
         }
 
@@ -89,6 +182,7 @@ final class HCI_Source_Client {
             'success' => true,
             'data' => $json['data'] ?? array(),
             'pagination' => $json['pagination'] ?? array(),
+            'status' => $status,
         );
     }
 

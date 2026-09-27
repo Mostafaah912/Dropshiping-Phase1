@@ -76,7 +76,22 @@ final class HCI_Products {
         self::render_shell_start();
 
         if ($notice === 'cache_refreshed') {
-            echo '<div class="notice notice-success is-dismissible"><p>فهرست محصولات از منبع دوباره دریافت شد.</p></div>';
+            $refresh_result = get_transient('hci_refresh_result_' . get_current_user_id());
+            delete_transient('hci_refresh_result_' . get_current_user_id());
+
+            if (is_array($refresh_result) && !empty($refresh_result['partial'])) {
+                echo '<div class="notice notice-warning is-dismissible"><p>' . esc_html((string) $refresh_result['message']) . '</p></div>';
+            } elseif (is_array($refresh_result) && !empty($refresh_result['success'])) {
+                echo '<div class="notice notice-success is-dismissible"><p>'
+                    . sprintf('بروزرسانی کامل شد — %s محصول از منبع دریافت شد.', esc_html(number_format((int) $refresh_result['count'])))
+                    . '</p></div>';
+            } elseif (is_array($refresh_result)) {
+                echo '<div class="notice notice-error is-dismissible"><p>بروزرسانی ناموفق بود'
+                    . ($refresh_result['message'] !== '' ? ': ' . esc_html((string) $refresh_result['message']) : '.')
+                    . '</p></div>';
+            } else {
+                echo '<div class="notice notice-success is-dismissible"><p>فهرست محصولات از منبع دوباره دریافت شد.</p></div>';
+            }
         }
 
         self::render_filter_bar($search, $category_id, $stock, $only_not_imported, $sort, $categories);
@@ -508,6 +523,18 @@ final class HCI_Products {
         self::guard();
         check_admin_referer('hci_refresh_products');
         HCI_Source_Client::clear_products_cache();
+        $result = HCI_Source_Client::get_all_products(true);
+        set_transient(
+            'hci_refresh_result_' . get_current_user_id(),
+            array(
+                'success' => !empty($result['success']),
+                'partial' => !empty($result['partial']),
+                'count' => count($result['items'] ?? array()),
+                'total_count' => $result['total_count'] ?? null,
+                'message' => $result['message'] ?? '',
+            ),
+            MINUTE_IN_SECONDS
+        );
         wp_safe_redirect(add_query_arg('hci_notice', 'cache_refreshed', admin_url('admin.php?page=heymode-client-importer-products')));
         exit;
     }

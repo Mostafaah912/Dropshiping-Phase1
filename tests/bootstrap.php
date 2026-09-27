@@ -147,7 +147,13 @@ function is_wp_error($thing): bool {
 
 function wp_remote_get(string $url, array $args = array()) {
     $GLOBALS['__test_last_requested_urls'][] = $url;
-    // پاسخ توسط هر تست، از طریق $GLOBALS['__stub_http_response'] تزریق می‌شود.
+    // برای سناریوهایی که هر فراخوانی متوالی باید پاسخ متفاوتی بدهد (مثلاً
+    // ۴۲۹ در یک درخواست و ۲۰۰ در بعدی)، یک صف اختیاری از پاسخ‌ها را هم
+    // پشتیبانی می‌کنیم؛ اگر خالی/تنظیم‌نشده باشد، رفتار قبلی (یک پاسخ ثابت
+    // از __stub_http_response) دست‌نخورده می‌ماند.
+    if (!empty($GLOBALS['__stub_http_response_queue'])) {
+        return array_shift($GLOBALS['__stub_http_response_queue']);
+    }
     return $GLOBALS['__stub_http_response'] ?? array(
         'response' => array('code' => 0, 'message' => ''),
         'body' => '',

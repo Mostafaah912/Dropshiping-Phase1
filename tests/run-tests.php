@@ -176,9 +176,9 @@ test_assert(
 test_section('تست ۳ — HMW_Source_API::category_tree(): ترتیب ریشه→برگ در ۳ سطح');
 
 $categoryMap = array(
-    1 => array('name' => 'دسته ریشه', 'parent' => 0),
-    2 => array('name' => 'دسته میانی', 'parent' => 1),
-    3 => array('name' => 'دسته برگ', 'parent' => 2),
+    1 => array('name' => 'دسته ریشه', 'slug' => 'root-cat', 'parent' => 0),
+    2 => array('name' => 'دسته میانی', 'slug' => 'mid-cat', 'parent' => 1),
+    3 => array('name' => 'دسته برگ فارسی', 'slug' => 'دسته-برگ-فارسی', 'parent' => 2),
 );
 
 $tree = HMW_Source_API::category_tree(array(3), $categoryMap);
@@ -188,7 +188,13 @@ test_assert(count($tree) === 3, 'دقیقاً ۳ عضو در مسیر دسته�
 test_assert($tree[0]['id'] === 1 && $tree[0]['parent_id'] === null, 'عضو اول = ریشه، parent_id آن null است');
 test_assert($tree[1]['id'] === 2 && $tree[1]['parent_id'] === $tree[0]['id'], 'عضو دوم، parent_id آن دقیقاً به id عضو اول اشاره می‌کند');
 test_assert($tree[2]['id'] === 3 && $tree[2]['parent_id'] === $tree[1]['id'], 'عضو سوم (برگ)، parent_id آن دقیقاً به id عضو دوم اشاره می‌کند');
-test_assert($tree[2]['name'] === 'دسته برگ', 'نام برگ صحیح است (ترتیب ریشه→برگ، نه برعکس)');
+test_assert($tree[2]['name'] === 'دسته برگ فارسی', 'نام برگ صحیح است (ترتیب ریشه→برگ، نه برعکس)');
+test_assert($tree[0]['slug'] === 'root-cat' && $tree[2]['slug'] === 'دسته-برگ-فارسی', 'از نسخه ۱.۹.۲: Slug هر Node (حتی فارسی) هم همراه با name/id/parent_id منتقل می‌شود');
+
+// سازگاری با نقشه دسته‌ای که هنوز slug ندارد (Cache قدیمی‌تر قبل از ۱.۹.۲) — نباید کرش کند.
+$legacyCategoryMap = array(1 => array('name' => 'دسته بدون اسلاگ', 'parent' => 0));
+$legacyTree = HMW_Source_API::category_tree(array(1), $legacyCategoryMap);
+test_assert($legacyTree[0]['slug'] === '', 'نقشه دسته بدون کلید slug هم بدون خطا رشته خالی برمی‌گرداند، نه کرش');
 
 // =============================================================================
 // تست ۴: HCI_Source_Client::test_connection() با API Key نادرست

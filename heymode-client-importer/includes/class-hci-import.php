@@ -9,12 +9,18 @@ final class HCI_Import {
     private const SKU_SOURCE_PREFIX = 'hmp';
     private const SKU_DEST_PREFIX = 'vsp';
     private const IMAGE_URL_META_KEY = '_hci_source_image_url';
+    // این دو کلید متا برای دکمه «ریست داده‌ها» عمومی‌اند: HCI_Admin با آن‌ها
+    // فقط محصولات/تصاویری را که واقعاً همین پلاگین ساخته پیدا و (در صورت
+    // درخواست صریح) حذف می‌کند.
+    public const SOURCE_PRODUCT_META_KEY = '_hci_source_product_id';
+    public const IMAGE_META_KEY = '_hci_imported';
 
     public static function init(): void {
         add_action(self::ACTION_HOOK, array(__CLASS__, 'process_import_action'), 10, 1);
         add_action('wp_ajax_hci_queue_import', array(__CLASS__, 'ajax_queue_import'));
         add_action('wp_ajax_hci_queue_batch_import', array(__CLASS__, 'ajax_queue_batch_import'));
         add_action('wp_ajax_hci_poll_import_status', array(__CLASS__, 'ajax_poll_import_status'));
+        add_action('wp_ajax_hci_import_next', array(__CLASS__, 'ajax_import_next'));
     }
 
     // =========================================================================
@@ -111,6 +117,11 @@ final class HCI_Import {
         return array('success' => true, 'message' => 'صف‌بندی شد.');
     }
 
+    private static function sanitize_stock_status($value): ?string {
+        $value = is_string($value) ? sanitize_key($value) : '';
+        return in_array($value, array('instock', 'outofstock', 'onbackorder'), true) ? $value : null;
+    }
+
     private static function sanitize_payload(array $decoded): array {
         $variations = array();
         foreach ((array) ($decoded['variations'] ?? array()) as $v) {
@@ -128,6 +139,7 @@ final class HCI_Import {
                 'attributes' => $attrs,
                 'price' => isset($v['price']) && $v['price'] !== null && $v['price'] !== '' ? (string) $v['price'] : null,
                 'stock_quantity' => isset($v['stock_quantity']) && $v['stock_quantity'] !== null ? (float) $v['stock_quantity'] : null,
+                'stock_status' => self::sanitize_stock_status($v['stock_status'] ?? null),
                 'sku' => !empty($v['sku']) ? sanitize_text_field((string) $v['sku']) : null,
             );
         }
@@ -142,14 +154,26 @@ final class HCI_Import {
                 static fn ($u): string => esc_url_raw((string) $u),
                 (array) ($decoded['images'] ?? array())
             ))),
-            'category_names' => array_values(array_filter(array_map(
-                static fn ($n): string => sanitize_text_field((string) $n),
-                (array) ($decoded['category_names'] ?? array())
+            'category_path' => array_values(array_filter(array_map(
+                static function ($node): ?array {
+                    $name = sanitize_text_field((string) ($node['name'] ?? ''));
+                    if ($name === '') {
+                        return null;
+                    }
+                    return array(
+                        'id' => (int) ($node['id'] ?? 0),
+                        'name' => $name,
+                        'slug' => sanitize_title((string) ($node['slug'] ?? '')),
+                        'parent_id' => isset($node['parent_id']) && $node['parent_id'] !== null ? (int) $node['parent_id'] : null,
+                    );
+                },
+                (array) ($decoded['category_path'] ?? array())
             ))),
             'product_type' => $product_type,
             'sku' => !empty($decoded['sku']) ? sanitize_text_field((string) $decoded['sku']) : null,
             'price' => isset($decoded['price']) && $decoded['price'] !== null && $decoded['price'] !== '' ? (string) $decoded['price'] : null,
             'stock_quantity' => isset($decoded['stock_quantity']) && $decoded['stock_quantity'] !== null ? (float) $decoded['stock_quantity'] : null,
+            'stock_status' => self::sanitize_stock_status($decoded['stock_status'] ?? null),
             'variations' => $variations,
         );
     }
@@ -196,37 +220,69 @@ final class HCI_Import {
     }
 
     /**
-     * سلسله‌مراتب کامل را از ریشه تا برگ، با تطبیق نام دقیق + Parent (نه
-     * Slug)، پیدا یا می‌سازد. term_exists($name, $tax, $parent) خودِ وردپرس
-     * این تطبیق را انجام می‌دهد — یک نام یکسان زیر Parent متفاوت، Match
-     * نمی‌شود و یک Term جدید (درست) ساخته می‌شود. فقط شناسه‌ی برگ را
-     * برمی‌گرداند؛ چون آرشیوهای دسته در وردپرس به‌صورت پیش‌فرض
-     * include_children دارند، همین برای نمایش در همه سطوح مسیر کافی است.
+     * آیا اصلاً دسته‌بندی‌های هی‌مد باید در مقصد ساخته/اعمال شوند؟ تنظیم
+     * جدید کارمند: پیش‌فرض بله (رفتار قبلی حفظ شده). «خیر» یعنی هیچ Term‌ای
+     * ساخته/جست‌وجو نمی‌شود و محصول دسته پیش‌فرض ووکامرس را می‌گیرد.
      */
-    public static function resolve_category_hierarchy(array $category_names): array {
-        $parent_id = 0;
+    public static function should_apply_categories(): bool {
+        return (bool) get_option('hci_apply_categories', true);
+    }
+
+    /**
+     * سلسله‌مراتب را از روی ارجاع صریح parent_id هر Node می‌سازد (نه با
+     * فرض این‌که آیتم i همیشه والدِ آیتم i+1 است). رگرسیون قبلی («فقط دسته
+     * آخر ساخته می‌شود») از همین فرض ترتیبی می‌آمد: وقتی category_path
+     * منبع بیش از یک شاخه دارد (محصول در چند دسته هم‌زمان)، آرایه‌ی مسطح
+     * چند شاخه را پشت‌سرهم می‌چیند و زنجیره‌ی ترتیبیِ قدیم آن‌ها را به‌اشتباه
+     * زیر هم (نه زیر Parent واقعی‌شان) می‌ساخت. اینجا با یک map از
+     * source_id → dest_term_id، هر Node دقیقاً زیر همان Parentی ساخته
+     * می‌شود که واقعاً در مبدا داشته.
+     *
+     * تطبیق دسته موجود همچنان «نام دقیق + Parent» است (نه Slug) —
+     * term_exists($name, $tax, $dest_parent_id) خودِ وردپرس این را تضمین
+     * می‌کند. Slug فقط برای Termهای *جدید* استفاده می‌شود (همان‌طور که در
+     * مبدا ذخیره شده)؛ اگر مبدا Slug نداد (نسخه قدیمی‌تر heymode-wholesale)
+     * یا در مقصد قبلاً گرفته شده باشد، وردپرس خودش از روی نام یک Slug
+     * یکتا می‌سازد — نیازی به منطق اضافه اینجا نیست.
+     *
+     * @param array $category_path آرایه‌ی ریشه→برگ از {id, name, slug, parent_id}
+     */
+    public static function resolve_category_hierarchy(array $category_path): array {
+        $dest_term_id_by_source_id = array();
         $leaf_term_id = 0;
 
-        foreach ($category_names as $name) {
-            $name = trim((string) $name);
+        foreach ($category_path as $node) {
+            $name = trim((string) ($node['name'] ?? ''));
             if ($name === '') {
                 continue;
             }
+            $source_id = (int) ($node['id'] ?? 0);
+            $source_parent_id = isset($node['parent_id']) ? (int) $node['parent_id'] : 0;
+            $dest_parent_id = ($source_parent_id > 0 && isset($dest_term_id_by_source_id[$source_parent_id]))
+                ? $dest_term_id_by_source_id[$source_parent_id]
+                : 0;
 
-            $existing = term_exists($name, 'product_cat', $parent_id);
+            $existing = term_exists($name, 'product_cat', $dest_parent_id);
             if (is_array($existing) && !empty($existing['term_id'])) {
                 $term_id = (int) $existing['term_id'];
             } elseif (is_numeric($existing) && (int) $existing > 0) {
                 $term_id = (int) $existing;
             } else {
-                $inserted = wp_insert_term($name, 'product_cat', array('parent' => $parent_id));
+                $insert_args = array('parent' => $dest_parent_id);
+                $slug = trim((string) ($node['slug'] ?? ''));
+                if ($slug !== '') {
+                    $insert_args['slug'] = $slug;
+                }
+                $inserted = wp_insert_term($name, 'product_cat', $insert_args);
                 if (is_wp_error($inserted)) {
-                    break;
+                    continue;
                 }
                 $term_id = (int) $inserted['term_id'];
             }
 
-            $parent_id = $term_id;
+            if ($source_id > 0) {
+                $dest_term_id_by_source_id[$source_id] = $term_id;
+            }
             $leaf_term_id = $term_id;
         }
 
@@ -260,6 +316,10 @@ final class HCI_Import {
             return 0;
         }
         update_post_meta((int) $attachment_id, self::IMAGE_URL_META_KEY, $url);
+        // برای دکمه «ریست داده‌ها»: علامت‌گذاری صریح که این پیوست را خودِ
+        // پلاگین دانلود کرده — تا گزینه اختیاری حذف محصولات/تصاویر فقط
+        // همین‌ها را پاک کند، نه تصویری که کارمند دستی در رسانه آپلود کرده.
+        update_post_meta((int) $attachment_id, self::IMAGE_META_KEY, 1);
         return (int) $attachment_id;
     }
 
@@ -267,34 +327,85 @@ final class HCI_Import {
     // پردازشِ خودِ Action Scheduler — یک محصول در هر Action
     // =========================================================================
 
+    /**
+     * هدف Action Scheduler (مسیر پشتیبان — برای وقتی کاربر صفحه بازبینی را
+     * بسته و کارگر مرورگر (ajax_import_next) دیگر در حال اجرا نیست). قبل از
+     * پردازش، همان Claim اتمیک مسیر AJAX را هم رعایت می‌کند تا اگر آن مسیر
+     * از قبل همین محصول را برده و پردازش کرده، اینجا دوباره ساخته نشود.
+     */
     public static function process_import_action(int $source_product_id): void {
-        $row = HCI_DB::get_map_row($source_product_id);
-        if (!$row) {
-            return;
+        HCI_DB::release_stale_locks();
+        $claim = HCI_DB::claim_specific($source_product_id);
+        if ($claim === null) {
+            return; // یا وجود ندارد، یا کس دیگری (مسیر AJAX) از قبل برده/تمام کرده
+        }
+        self::process_claimed_row($source_product_id);
+    }
+
+    /**
+     * برای کارگر سمت مرورگر: قفل‌های قدیمی (>۵ دقیقه) را آزاد می‌کند، یک
+     * ردیف queued را اتمیک Claim می‌کند و بلافاصله همان‌جا (Synchronous)
+     * پردازش می‌کند — نه در پس‌زمینه — تا JS بلافاصله نتیجه را برای همان
+     * ردیف نشان دهد. اگر چیزی برای Claim نبود، done=true برمی‌گرداند.
+     */
+    public static function ajax_import_next(): void {
+        if (!current_user_can(self::CAPABILITY)) {
+            wp_send_json_error(array('message' => 'Access denied.'), 403);
+        }
+        check_ajax_referer('hci_import_next');
+
+        HCI_DB::release_stale_locks();
+        $claim = HCI_DB::claim_next_queued();
+        if ($claim === null) {
+            wp_send_json_success(array('done' => true));
         }
 
-        HCI_DB::mark_processing($source_product_id);
+        $result = self::process_claimed_row($claim['source_product_id']);
+        wp_send_json_success(array(
+            'done' => false,
+            'source_product_id' => $claim['source_product_id'],
+            'import_status' => $result['import_status'],
+            'error_message' => $result['error_message'],
+        ));
+    }
+
+    /**
+     * هسته پردازش واقعی یک ردیف که همین الان با موفقیت Claim شده (وضعیت
+     * از قبل processing است) — هر دو مسیر (Action Scheduler و AJAX
+     * کارگر مرورگر) دقیقاً همین یک تابع را صدا می‌زنند تا منطق ساخت
+     * محصول یک‌جا و بدون تکرار بماند. هر مرحله زمان‌گیری و در لاگ خطای
+     * وردپرس ثبت می‌شود (برای ریشه‌یابی کندی/خطای واقعی صف).
+     */
+    private static function process_claimed_row(int $source_product_id): array {
+        $t0 = microtime(true);
+        self::log_step($source_product_id, 'claimed', $t0, $t0);
+
+        $row = HCI_DB::get_map_row($source_product_id);
+        if (!$row) {
+            return array('import_status' => HCI_DB::STATUS_ERROR, 'error_message' => 'ردیف ردیابی پیدا نشد.');
+        }
 
         $payload = json_decode((string) ($row['import_payload'] ?? ''), true);
         if (!is_array($payload)) {
-            HCI_DB::save_import_result($source_product_id, array(
+            $result = array(
                 'import_status' => HCI_DB::STATUS_ERROR,
                 'error_message' => 'اطلاعات محصول برای Import در دسترس نیست (Snapshot خالی یا نامعتبر).',
-            ));
-            return;
+            );
+            HCI_DB::save_import_result($source_product_id, $result);
+            return $result;
         }
 
         $product_type = ($payload['product_type'] ?? '') === 'variable' ? 'variable' : 'simple';
         $dest_sku = self::transform_sku($payload['sku'] ?? ($row['source_sku'] ?? null));
         $existing_dest_id = !empty($row['dest_product_id']) ? (int) $row['dest_product_id'] : 0;
 
+        $t_dup = microtime(true);
         $duplicate_message = self::check_duplicate((int) $row['id'], $source_product_id, $row['source_sku'] ?? null, $dest_sku, $existing_dest_id);
+        self::log_step($source_product_id, 'duplicate_check', $t_dup, $t0);
         if ($duplicate_message !== null) {
-            HCI_DB::save_import_result($source_product_id, array(
-                'import_status' => HCI_DB::STATUS_DUPLICATE,
-                'error_message' => $duplicate_message,
-            ));
-            return;
+            $result = array('import_status' => HCI_DB::STATUS_DUPLICATE, 'error_message' => $duplicate_message);
+            HCI_DB::save_import_result($source_product_id, $result);
+            return $result;
         }
 
         try {
@@ -309,25 +420,42 @@ final class HCI_Import {
             $product->set_name((string) ($payload['name'] ?? ''));
             $product->set_short_description((string) ($payload['short_description'] ?? ''));
 
-            $category_ids = self::resolve_category_hierarchy((array) ($payload['category_names'] ?? array()));
-            if ($category_ids) {
-                $product->set_category_ids($category_ids);
+            $t_cat = microtime(true);
+            if (self::should_apply_categories()) {
+                $category_ids = self::resolve_category_hierarchy((array) ($payload['category_path'] ?? array()));
+                if ($category_ids) {
+                    $product->set_category_ids($category_ids);
+                }
             }
+            // اگر تنظیم «خیر» باشد، set_category_ids() اصلاً صدا زده نمی‌شود —
+            // محصول همان دسته پیش‌فرض ووکامرس (Uncategorized) را می‌گیرد.
+            self::log_step($source_product_id, 'categories', $t_cat, $t0);
 
+            $t_img = microtime(true);
             $image_error = self::apply_images($product, $payload);
+            self::log_step($source_product_id, 'images', $t_img, $t0);
 
+            $t_save = microtime(true);
             $parent_id = ($product_type === 'variable')
                 ? self::save_variable_product($product, $payload, $dest_sku)
                 : self::save_simple_product($product, $payload, $dest_sku);
+            self::log_step($source_product_id, 'save', $t_save, $t0);
+
+            // برای دکمه «ریست داده‌ها»: محصولی که این پلاگین می‌سازد (حتی اگر
+            // بعداً Partial/Error بماند) باید همیشه قابل شناسایی باشد تا
+            // گزینه اختیاری «حذف محصولات ساخته‌شده توسط این پلاگین» فقط
+            // همین‌ها را پاک کند، نه هیچ محصول دیگری.
+            update_post_meta($parent_id, '_hci_source_product_id', $source_product_id);
 
             if ($image_error !== null) {
-                HCI_DB::save_import_result($source_product_id, array(
+                $result = array(
                     'dest_product_id' => $parent_id,
                     'dest_sku' => $dest_sku,
                     'import_status' => HCI_DB::STATUS_PARTIAL,
                     'error_message' => $image_error,
-                ));
-                return;
+                );
+                HCI_DB::save_import_result($source_product_id, $result);
+                return $result;
             }
 
             $final_status = HCI_Pricing::get_default_post_status();
@@ -336,21 +464,36 @@ final class HCI_Import {
             $product->save();
 
             if ($product_type === 'variable') {
+                $t_var = microtime(true);
                 self::save_variations($parent_id, $source_product_id, (array) ($payload['variations'] ?? array()));
+                self::log_step($source_product_id, 'variations', $t_var, $t0);
             }
 
-            HCI_DB::save_import_result($source_product_id, array(
+            $result = array(
                 'dest_product_id' => $parent_id,
                 'dest_sku' => $dest_sku,
                 'import_status' => HCI_DB::STATUS_IMPORTED,
                 'error_message' => null,
-            ));
+            );
+            HCI_DB::save_import_result($source_product_id, $result);
+            self::log_step($source_product_id, 'done', microtime(true), $t0);
+            return $result;
         } catch (Throwable $e) {
-            HCI_DB::save_import_result($source_product_id, array(
-                'import_status' => HCI_DB::STATUS_ERROR,
-                'error_message' => $e->getMessage(),
-            ));
+            $result = array('import_status' => HCI_DB::STATUS_ERROR, 'error_message' => $e->getMessage());
+            HCI_DB::save_import_result($source_product_id, $result);
+            return $result;
         }
+    }
+
+    /**
+     * فقط ابزار ریشه‌یابی کندی/خطای واقعی صف (مورد ۴ گزارش تست): مدت هر
+     * مرحله و مدت جمعی از لحظه Claim را در لاگ خطای وردپرس ثبت می‌کند.
+     * هرگز رفتار Import را تغییر نمی‌دهد و هرگز استثنا پرتاب نمی‌کند.
+     */
+    private static function log_step(int $source_product_id, string $step, float $step_started_at, float $overall_started_at): void {
+        $step_ms = round((microtime(true) - $step_started_at) * 1000, 1);
+        $total_ms = round((microtime(true) - $overall_started_at) * 1000, 1);
+        error_log(sprintf('[HCI Import] product=%d step=%s step_ms=%s total_ms=%s', $source_product_id, $step, $step_ms, $total_ms));
     }
 
     /**
@@ -400,7 +543,7 @@ final class HCI_Import {
         $product->set_regular_price((string) $final_price);
         $product->set_price((string) $final_price);
 
-        self::apply_stock($product, $payload['stock_quantity'] ?? null);
+        self::apply_stock($product, $payload['stock_quantity'] ?? null, $payload['stock_status'] ?? null);
 
         return (int) $product->save();
     }
@@ -477,7 +620,7 @@ final class HCI_Import {
             $variation_product->set_regular_price((string) $final_price);
             $variation_product->set_price((string) $final_price);
 
-            self::apply_stock($variation_product, $variation_payload['stock_quantity'] ?? null);
+            self::apply_stock($variation_product, $variation_payload['stock_quantity'] ?? null, $variation_payload['stock_status'] ?? null);
 
             // SKU مشترک Parent هرگز روی Variation کپی نمی‌شود: فقط اگر خودِ
             // این Variation در منبع SKU مجزا داشت تبدیل و ست می‌شود.
@@ -507,10 +650,57 @@ final class HCI_Import {
         return HCI_Pricing::resolve_price((float) $raw_price);
     }
 
-    private static function apply_stock(WC_Product $product, $stock_quantity): void {
-        $product->set_manage_stock(true);
-        $quantity = $stock_quantity !== null ? (float) $stock_quantity : 0.0;
-        $product->set_stock_quantity($quantity);
-        $product->set_stock_status($quantity > 0 ? 'instock' : 'outofstock');
+    /**
+     * قاعده مشترک موجودی — هم Import هم HCI_Sync از همین یک تابع استفاده
+     * می‌کنند تا رفتار جایی دیگر دوباره (و ناهم‌خوان) نوشته نشود:
+     *
+     *   - stock_quantity عدد مشخص > 0  ⇒ manage_stock=true، همان عدد، instock
+     *   - stock_quantity دقیقاً 0      ⇒ manage_stock=true، 0، outofstock
+     *   - stock_quantity خالی/NULL     ⇒ manage_stock=false و stock_status
+     *     دقیقاً همان چیزی که خودِ مبدا گزارش کرده (نه حدس‌زده از عدد)
+     *
+     * ریشه باگ گزارش‌شده («مودال: موجود، محصول ساخته‌شده: ناموجود») همین
+     * حالت سوم بود: وقتی مدیریت موجودی در مبدا خاموش است، stock_quantity
+     * همیشه NULL است، ولی کد قدیم آن را 0 فرض می‌کرد و بدون توجه به
+     * stock_status واقعی مبدا (که instock بود) محصول را outofstock می‌ساخت.
+     * خروجی bool: آیا واقعاً چیزی روی محصول تغییر کرد (برای شمارنده
+     * stock_updated در HCI_Sync لازم است؛ Import آن را نادیده می‌گیرد).
+     */
+    public static function apply_stock(WC_Product $product, $stock_quantity, ?string $stock_status): bool {
+        $changed = false;
+
+        if ($stock_quantity !== null && $stock_quantity !== '') {
+            $quantity = (float) $stock_quantity;
+            $resolved_status = $quantity > 0 ? 'instock' : 'outofstock';
+            if (!$product->get_manage_stock()) {
+                $product->set_manage_stock(true);
+                $changed = true;
+            }
+            if ((float) $product->get_stock_quantity() !== $quantity) {
+                $product->set_stock_quantity($quantity);
+                $changed = true;
+            }
+            if ($product->get_stock_status() !== $resolved_status) {
+                $product->set_stock_status($resolved_status);
+                $changed = true;
+            }
+            return $changed;
+        }
+
+        // مدیریت موجودی در مبدا خاموش است — عدد دقیقی برای موجودی نداریم،
+        // پس اصلاً manage_stock را روشن نمی‌کنیم و فقط وضعیت خام مبدا را
+        // منتقل می‌کنیم (پیش‌فرض instock فقط اگر خودِ مبدا هم چیزی نگفته).
+        $allowed_statuses = array('instock', 'outofstock', 'onbackorder');
+        $resolved_status = in_array($stock_status, $allowed_statuses, true) ? $stock_status : 'instock';
+
+        if ($product->get_manage_stock()) {
+            $product->set_manage_stock(false);
+            $changed = true;
+        }
+        if ($product->get_stock_status() !== $resolved_status) {
+            $product->set_stock_status($resolved_status);
+            $changed = true;
+        }
+        return $changed;
     }
 }

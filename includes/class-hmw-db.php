@@ -138,7 +138,7 @@ final class HMW_DB {
         $active_sql = $include_inactive ? '' : ' AND is_active = 1';
         $rows = $wpdb->get_results(
             $wpdb->prepare(
-                'SELECT source_product_id, parent_product_id, sku, price, stock_quantity, attributes FROM ' . self::products_table() .
+                'SELECT source_product_id, parent_product_id, sku, price, stock_quantity, stock_status, attributes FROM ' . self::products_table() .
                 " WHERE parent_product_id IN ({$placeholders}) AND product_type = 'variation'{$active_sql} ORDER BY source_product_id ASC",
                 $parent_ids
             ),

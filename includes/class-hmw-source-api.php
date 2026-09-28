@@ -101,7 +101,7 @@ final class HMW_Source_API {
                 'per_page' => 100,
                 'orderby' => 'id',
                 'order' => 'asc',
-                '_fields' => 'id,name,parent',
+                '_fields' => 'id,name,slug,parent',
             ));
             if (!$result['success']) {
                 return $result;
@@ -111,6 +111,7 @@ final class HMW_Source_API {
                 if (isset($item['id'])) {
                     $map[(int) $item['id']] = array(
                         'name' => (string) ($item['name'] ?? ''),
+                        'slug' => (string) ($item['slug'] ?? ''),
                         'parent' => (int) ($item['parent'] ?? 0),
                     );
                 }
@@ -250,6 +251,7 @@ final class HMW_Source_API {
                 $result[] = array(
                     'id' => $category_node_id,
                     'name' => (string) ($map[$category_node_id]['name'] ?? ''),
+                    'slug' => (string) ($map[$category_node_id]['slug'] ?? ''),
                     'parent_id' => $parent_id > 0 ? $parent_id : null,
                 );
             }

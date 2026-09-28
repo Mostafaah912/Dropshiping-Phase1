@@ -133,9 +133,17 @@ final class HCI_Source_Client {
      * می‌گذارد تا واکشی بعدی Resume شود)، اینجا صراحتاً هر دو Transient پاک
      * می‌شوند — چون این یک ریست کامل و آگاهانه است، نه ادامه یک واکشی قبلی.
      */
-    public static function clear_all_cache(): void {
-        delete_transient(self::PRODUCTS_CACHE_TRANSIENT);
-        delete_transient(self::PARTIAL_STATE_TRANSIENT);
+    public static function clear_all_cache(): int {
+        $cleared = 0;
+        if (get_transient(self::PRODUCTS_CACHE_TRANSIENT) !== false) {
+            delete_transient(self::PRODUCTS_CACHE_TRANSIENT);
+            $cleared++;
+        }
+        if (get_transient(self::PARTIAL_STATE_TRANSIENT) !== false) {
+            delete_transient(self::PARTIAL_STATE_TRANSIENT);
+            $cleared++;
+        }
+        return $cleared;
     }
 
     /**

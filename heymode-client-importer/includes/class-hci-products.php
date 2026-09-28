@@ -5,7 +5,7 @@ defined('ABSPATH') || exit;
 final class HCI_Products {
     private const CAPABILITY = 'manage_woocommerce';
     private const PER_PAGE = 48;
-    private const SELECTION_TRANSIENT_PREFIX = 'hci_selection_';
+    public const SELECTION_TRANSIENT_PREFIX = 'hci_selection_';
     private const SELECTION_TTL = 30 * MINUTE_IN_SECONDS;
 
     public static function init(): void {
@@ -61,9 +61,16 @@ final class HCI_Products {
         $sort = isset($_GET['sort']) ? sanitize_key(wp_unslash($_GET['sort'])) : 'newest';
         $paged = isset($_GET['paged']) ? max(1, (int) $_GET['paged']) : 1;
 
-        $imported_ids = array_flip(HCI_DB::get_imported_source_ids());
+        // «قفل‌شده» = واقعاً Import‌شده یا الان در صف/پردازش (نه هر رکورد با هر
+        // وضعیتی — یک Import شکست‌خورده/Partial نباید کارت را برای همیشه
+        // غیرقابل‌انتخاب کند؛ کارمند باید بتواند از همین گرید دوباره تلاش کند).
+        $locked_ids = array_flip(HCI_DB::get_grid_locked_source_ids());
+        // «ردیابی‌شده» = هر رکوردی با هر وضعیتی — فقط برای پاک‌سازی خودکار
+        // انتخاب‌های محلی (localStorage) که دیگر معتبر نیستند (چون یک تلاش
+        // Import قبلی، موفق یا ناموفق، از قبل برای آن‌ها ثبت شده).
+        $tracked_ids = array_flip(HCI_DB::get_imported_source_ids());
 
-        $filtered = self::filter_items($items, $search, $category_id, $stock, $only_not_imported, $imported_ids);
+        $filtered = self::filter_items($items, $search, $category_id, $stock, $only_not_imported, $locked_ids);
         $sorted = self::sort_items($filtered, $sort);
 
         $total = count($sorted);
@@ -102,12 +109,24 @@ final class HCI_Products {
         echo '<input type="hidden" name="action" value="hci_next_step">';
         wp_nonce_field('hci_next_step');
         echo '<p><label><input type="checkbox" id="hci-select-all-page"> انتخاب همه در این صفحه</label> ';
-        echo '<button type="submit" class="button button-primary" style="margin-right:8px">مرحله بعد ←</button></p>';
+        echo '<button type="submit" class="button button-primary" style="margin-right:8px">مرحله بعد ←</button> ';
+        echo '<button type="button" class="button" id="hci-clear-selection" style="margin-right:8px">پاک کردن انتخاب‌ها</button> ';
+        echo '<strong id="hci-selection-counter" style="margin-right:8px"></strong></p>';
         echo '<textarea name="selection_json" id="hci-selection-json" style="display:none"></textarea>';
+
+        $page_statuses = HCI_DB::get_import_statuses(array_map(
+            static fn (array $item): int => (int) ($item['source_product_id'] ?? 0),
+            $page_items
+        ));
 
         echo '<div class="hci-grid">';
         foreach ($page_items as $item) {
-            self::render_card($item, isset($imported_ids[(int) $item['source_product_id']]));
+            $item_id = (int) ($item['source_product_id'] ?? 0);
+            $item_status = $page_statuses[$item_id]['import_status'] ?? null;
+            $badge_text = $item_status === HCI_DB::STATUS_QUEUED || $item_status === HCI_DB::STATUS_PROCESSING
+                ? 'در حال Import'
+                : 'قبلاً ثبت شده';
+            self::render_card($item, isset($locked_ids[$item_id]), $badge_text);
         }
         echo '</div>';
 
@@ -115,7 +134,7 @@ final class HCI_Products {
 
         self::render_pagination($paged, $total_pages);
         self::render_modal();
-        self::render_grid_script($page_items);
+        self::render_grid_script($page_items, array_keys($tracked_ids));
 
         self::render_shell_end();
     }
@@ -243,7 +262,7 @@ final class HCI_Products {
         self::render_refresh_button();
     }
 
-    private static function render_card(array $item, bool $already_imported): void {
+    private static function render_card(array $item, bool $locked, string $badge_text = 'قبلاً ثبت شده'): void {
         $id = (int) ($item['source_product_id'] ?? 0);
         $image = $item['image_url'] ?? '';
         $name = (string) ($item['name'] ?? '');
@@ -265,13 +284,13 @@ final class HCI_Products {
             <div class="hci-card-price"><?php echo esc_html((string) $price); ?></div>
             <div class="hci-card-actions">
                 <label>
-                    <input type="checkbox" class="hci-card-checkbox" data-id="<?php echo esc_attr((string) $id); ?>" <?php disabled($already_imported); ?>>
+                    <input type="checkbox" class="hci-card-checkbox" data-id="<?php echo esc_attr((string) $id); ?>" <?php disabled($locked); ?>>
                     انتخاب
                 </label>
-                <button type="button" class="button hci-sell-btn" data-id="<?php echo esc_attr((string) $id); ?>" <?php disabled($already_imported); ?>>بفروشش</button>
+                <button type="button" class="button hci-sell-btn" data-id="<?php echo esc_attr((string) $id); ?>" <?php disabled($locked); ?>>بفروشش</button>
             </div>
-            <?php if ($already_imported) : ?>
-                <div class="hci-card-badge">قبلاً ثبت شده</div>
+            <?php if ($locked) : ?>
+                <div class="hci-card-badge"><?php echo esc_html($badge_text); ?></div>
             <?php endif; ?>
         </div>
         <?php
@@ -301,7 +320,7 @@ final class HCI_Products {
                 <table class="form-table">
                     <tbody>
                         <tr><th>نام</th><td><input type="text" id="hci-modal-name" class="regular-text" style="width:100%"></td></tr>
-                        <tr><th>توضیح کوتاه</th><td><textarea id="hci-modal-desc" rows="4" style="width:100%"></textarea></td></tr>
+                        <tr><th>توضیح کوتاه</th><td><textarea id="hci-modal-desc" rows="4" dir="ltr" style="width:100%;text-align:left"></textarea></td></tr>
                         <tr><th>گالری تصاویر</th><td><div id="hci-modal-gallery"></div></td></tr>
                         <tr><th>سلسله دسته‌بندی</th><td id="hci-modal-categories"></td></tr>
                         <tr><th>قیمت محاسبه‌شده</th><td id="hci-modal-price"></td></tr>
@@ -354,7 +373,19 @@ final class HCI_Products {
      */
     private static function build_product_json_entry(array $item): array {
         $id = (int) ($item['source_product_id'] ?? 0);
+        // category_names فقط برای نمایش (مودال/جدول بازبینی) است. category_path
+        // ساختار کامل (id/name/slug/parent_id) را برای ساخت درست سلسله‌مراتب
+        // توسط resolve_category_hierarchy() نگه می‌دارد — نه فقط نام‌های مسطح،
+        // چون همان فرض ترتیبی/مسطح باعث باگ «فقط دسته آخر ساخته می‌شود» بود.
         $category_names = array_map(static fn ($n) => (string) ($n['name'] ?? ''), (array) ($item['category_path'] ?? array()));
+        $category_path = array_map(static function (array $n): array {
+            return array(
+                'id' => (int) ($n['id'] ?? 0),
+                'name' => (string) ($n['name'] ?? ''),
+                'slug' => (string) ($n['slug'] ?? ''),
+                'parent_id' => $n['parent_id'] ?? null,
+            );
+        }, (array) ($item['category_path'] ?? array()));
         $product_type = (string) ($item['product_type'] ?? 'simple');
 
         $variations = array();
@@ -365,6 +396,7 @@ final class HCI_Products {
                     'attributes' => (array) ($variation['attributes'] ?? array()),
                     'price' => $variation['price'] ?? null,
                     'stock_quantity' => $variation['stock_quantity'] ?? null,
+                    'stock_status' => (string) ($variation['stock_status'] ?? ''),
                     'sku' => $variation['sku'] ?? null,
                 );
             }
@@ -379,6 +411,7 @@ final class HCI_Products {
             'stock_status' => (string) ($item['stock_status'] ?? ''),
             'stock_quantity' => $item['stock_quantity'] ?? null,
             'category_names' => $category_names,
+            'category_path' => $category_path,
             'image_url' => $item['image_url'],
             'gallery' => (array) ($item['gallery'] ?? array()),
             'product_type' => $product_type,
@@ -386,7 +419,7 @@ final class HCI_Products {
         );
     }
 
-    private static function render_grid_script(array $page_items): void {
+    private static function render_grid_script(array $page_items, array $tracked_ids = array()): void {
         $products_json = array();
         foreach ($page_items as $item) {
             $id = (int) ($item['source_product_id'] ?? 0);
@@ -396,7 +429,15 @@ final class HCI_Products {
         <script>
         (function () {
             const PRODUCTS = <?php echo wp_json_encode($products_json, JSON_UNESCAPED_UNICODE); ?>;
-            const STORAGE_KEY = 'hci_selection_v1';
+            // شناسه‌هایی که همین الان حداقل یک رکورد (با هر وضعیتی — موفق یا
+            // ناموفق) در جدول ردیابی دارند. اگر یکی از این‌ها هنوز در
+            // localStorage به‌عنوان «انتخاب‌شده» مانده، یعنی این یک انتخاب
+            // قدیمی/بی‌اعتبار از یک تلاش قبلی است — نه اینکه واقعاً دوباره
+            // انتخاب شده — پس باید از selection پاک شود (نه اینکه دوباره
+            // Import صف‌بندی شود).
+            const TRACKED_IDS = <?php echo wp_json_encode(array_values(array_map('strval', $tracked_ids))); ?>;
+            const CURRENT_USER_ID = <?php echo (int) get_current_user_id(); ?>;
+            const STORAGE_KEY = 'hci_selection_v1_' + CURRENT_USER_ID;
 
             function loadSelection() {
                 try {
@@ -410,7 +451,30 @@ final class HCI_Products {
 
             let selection = loadSelection();
 
+            // پاک‌سازی خودکار: هر ایدی‌ای در selection محلی که الان در دیتابیس
+            // سرور هم ردیابی می‌شود (چه Import شده، چه در صف، چه حتی خطا
+            // خورده) دیگر یک «انتخاب تازه» محسوب نمی‌شود.
+            (function purgeStaleSelection() {
+                let changed = false;
+                TRACKED_IDS.forEach(function (id) {
+                    if (selection[id]) {
+                        delete selection[id];
+                        changed = true;
+                    }
+                });
+                if (changed) { saveSelection(selection); }
+            })();
+
             function defaultEntry(product) {
+                // «انتخاب Featured» و «حذف از گالری» دو وضعیت کاملاً مستقل‌اند:
+                // images همیشه فهرست کامل و یکتای همه تصاویر (شامل خودِ تصویر
+                // اصلی) است، و featured_image فقط یک اشاره‌گر به یکی از
+                // همان‌هاست — نه یک لیست جدا که با عوض شدن featured، عضو
+                // قبلی‌اش برای همیشه گم شود.
+                const gallery = (product.gallery || []).slice();
+                const images = product.image_url
+                    ? [product.image_url].concat(gallery.filter(function (u) { return u !== product.image_url; }))
+                    : gallery;
                 return {
                     source_product_id: product.id,
                     name: product.name,
@@ -418,12 +482,21 @@ final class HCI_Products {
                     sku: product.sku,
                     price: product.price,
                     stock_quantity: product.stock_quantity,
+                    stock_status: product.stock_status,
                     category_names: product.category_names,
-                    featured_image: product.image_url,
-                    images: (product.gallery || []).slice(),
+                    category_path: product.category_path || [],
+                    featured_image: product.image_url || images[0] || null,
+                    images: images,
                     product_type: product.product_type,
                     variations: product.variations || [],
                 };
+            }
+
+            function updateSelectionCounter() {
+                const el = document.getElementById('hci-selection-counter');
+                if (!el) return;
+                const count = Object.keys(selection).length;
+                el.textContent = count > 0 ? (count + ' محصول انتخاب‌شده') : '';
             }
 
             function syncCheckboxes() {
@@ -431,6 +504,7 @@ final class HCI_Products {
                     const id = cb.getAttribute('data-id');
                     cb.checked = !!selection[id];
                 });
+                updateSelectionCounter();
             }
             syncCheckboxes();
 
@@ -445,8 +519,18 @@ final class HCI_Products {
                         delete selection[id];
                     }
                     saveSelection(selection);
+                    updateSelectionCounter();
                 });
             });
+
+            const clearBtn = document.getElementById('hci-clear-selection');
+            if (clearBtn) {
+                clearBtn.addEventListener('click', function () {
+                    selection = {};
+                    saveSelection(selection);
+                    syncCheckboxes();
+                });
+            }
 
             const selectAll = document.getElementById('hci-select-all-page');
             if (selectAll) {
@@ -468,11 +552,11 @@ final class HCI_Products {
             function renderGallery() {
                 const container = document.getElementById('hci-modal-gallery');
                 container.innerHTML = '';
-                const allImages = [];
-                if (modalState.featured_image) allImages.push(modalState.featured_image);
-                modalState.images.forEach(function (url) { if (url !== modalState.featured_image) allImages.push(url); });
 
-                allImages.forEach(function (url) {
+                // modalState.images همیشه فهرست کامل تصاویر است (شامل خودِ
+                // تصویر اصلی)؛ featured_image فقط اشاره‌گر است، نه یک لیست
+                // جدا — پس اینجا هیچ بازسازی/فیلتر جداگانه‌ای لازم نیست.
+                modalState.images.forEach(function (url) {
                     const wrap = document.createElement('div');
                     wrap.className = 'hci-gallery-item';
 
@@ -480,18 +564,22 @@ final class HCI_Products {
                     img.src = url;
                     wrap.appendChild(img);
 
+                    const isFeatured = (url === modalState.featured_image);
+
                     const radioLabel = document.createElement('label');
                     radioLabel.style.cssText = 'display:block;font-size:11px;cursor:pointer';
                     const radio = document.createElement('input');
                     radio.type = 'radio';
                     radio.name = 'hci-featured';
-                    radio.checked = (url === modalState.featured_image);
+                    radio.checked = isFeatured;
                     radio.addEventListener('change', function () {
+                        // فقط اشاره‌گر featured_image عوض می‌شود — تصویر قبلی
+                        // همچنان در modalState.images می‌ماند، مگر با ✕ حذف شود.
                         modalState.featured_image = url;
                         renderGallery();
                     });
                     radioLabel.appendChild(radio);
-                    radioLabel.appendChild(document.createTextNode(' تصویر اصلی'));
+                    radioLabel.appendChild(document.createTextNode(isFeatured ? ' تصویر اصلی' : ' انتخاب به‌عنوان اصلی'));
                     wrap.appendChild(document.createElement('br'));
                     wrap.appendChild(radioLabel);
 
@@ -501,7 +589,8 @@ final class HCI_Products {
                     removeBtn.textContent = '×';
                     removeBtn.addEventListener('click', function () {
                         modalState.images = modalState.images.filter(function (u) { return u !== url; });
-                        if (modalState.featured_image === url) {
+                        if (isFeatured) {
+                            // اگر خودِ تصویر اصلی حذف شد، اولین تصویر باقی‌مانده اصلی می‌شود.
                             modalState.featured_image = modalState.images[0] || null;
                         }
                         renderGallery();
@@ -577,6 +666,7 @@ final class HCI_Products {
                 saveSelection(selection);
                 const cb = document.querySelector('.hci-card-checkbox[data-id="' + currentProductId + '"]');
                 if (cb && !cb.disabled) { cb.checked = true; }
+                updateSelectionCounter();
                 overlay.style.display = 'none';
             });
 
@@ -722,11 +812,13 @@ final class HCI_Products {
                         'featured_image' => $entry['featured_image'] ?? null,
                         'images' => $entry['images'] ?? array(),
                         'category_names' => $entry['category_names'] ?? array(),
+                        'category_path' => $entry['category_path'] ?? array(),
                         'product_type' => $entry['product_type'] ?? 'simple',
                         'variations' => $entry['variations'] ?? array(),
                         'sku' => $source_sku !== '' ? $source_sku : null,
                         'price' => $entry['price'] ?? null,
                         'stock_quantity' => $entry['stock_quantity'] ?? null,
+                        'stock_status' => $entry['stock_status'] ?? null,
                     );
                     ?>
                     <tr data-id="<?php echo esc_attr((string) $source_product_id); ?>" data-sku="<?php echo esc_attr($source_sku); ?>" data-entry="<?php echo esc_attr((string) wp_json_encode($entry_payload)); ?>">
@@ -738,7 +830,7 @@ final class HCI_Products {
                             <?php echo esc_html($price_display['display']); ?>
                             <?php if ($price_display['is_range']) : ?><br><span style="font-size:10px;color:#787c82">(چند قیمتی — Hover کنید)</span><?php endif; ?>
                         </td>
-                        <td><textarea class="hci-review-desc" rows="2" style="width:100%"><?php echo esc_textarea((string) ($entry['short_description'] ?? '')); ?></textarea></td>
+                        <td><textarea class="hci-review-desc" rows="2" dir="ltr" style="width:100%;text-align:left"><?php echo esc_textarea((string) ($entry['short_description'] ?? '')); ?></textarea></td>
                         <td class="hci-status-cell" data-id="<?php echo esc_attr((string) $source_product_id); ?>">
                             <?php echo self::render_status_badge($status, $status_row['error_message'] ?? ''); ?>
                         </td>
@@ -761,7 +853,25 @@ final class HCI_Products {
         (function () {
             const queueNonce = <?php echo wp_json_encode(wp_create_nonce('hci_queue_import')); ?>;
             const pollNonce = <?php echo wp_json_encode(wp_create_nonce('hci_poll_import_status')); ?>;
+            const importNextNonce = <?php echo wp_json_encode(wp_create_nonce('hci_import_next')); ?>;
             const ajaxUrl = <?php echo wp_json_encode(admin_url('admin-ajax.php')); ?>;
+            const SELECTION_STORAGE_KEY = 'hci_selection_v1_' + <?php echo (int) get_current_user_id(); ?>;
+
+            // به محض این‌که محصولی واقعاً به صف Import رفت، دیگر یک «انتخاب
+            // باز» در صفحه محصولات نیست — همان‌جا از localStorage (که صفحه
+            // محصولات هم از همین کلید می‌خواند) پاک می‌شود تا بعد از بازگشت
+            // به گرید، دوباره به‌اشتباه تیک‌خورده/قابل Import دیده نشود.
+            function removeFromLocalSelection(id) {
+                try {
+                    const raw = localStorage.getItem(SELECTION_STORAGE_KEY);
+                    if (!raw) return;
+                    const sel = JSON.parse(raw);
+                    if (sel && Object.prototype.hasOwnProperty.call(sel, String(id))) {
+                        delete sel[String(id)];
+                        localStorage.setItem(SELECTION_STORAGE_KEY, JSON.stringify(sel));
+                    }
+                } catch (e) { /* localStorage در دسترس نیست — بی‌ضرر نادیده گرفته می‌شود */ }
+            }
 
             const pendingIds = new Set();
             let totalQueued = 0;
@@ -850,6 +960,52 @@ final class HCI_Products {
                 poll();
             }
 
+            // «کارگر سمت مرورگر»: به‌جای منتظرِ صرفِ WP-Cron/Action Scheduler
+            // Loopback ماندن (که ممکن است تا بازدید بعدی سایت اصلاً اجرا
+            // نشود)، همین‌جا JS پشت‌سرهم و تک‌به‌تک hci_import_next را صدا
+            // می‌زند؛ هر بار دقیقاً یک محصول از صف پردازش و نتیجه‌اش بلافاصله
+            // در همان ردیف نشان داده می‌شود. Action Scheduler به‌عنوان
+            // پشتیبان (وقتی کاربر تب را می‌بندد) با همان Claim اتمیک می‌ماند
+            // — یک ردیف هرگز دوبار پردازش نمی‌شود.
+            let importWorkerRunning = false;
+            function runImportWorkerStep() {
+                const body = new URLSearchParams();
+                body.set('action', 'hci_import_next');
+                body.set('_ajax_nonce', importNextNonce);
+                fetch(ajaxUrl, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString() })
+                    .then(function (r) { return r.json(); })
+                    .then(function (d) {
+                        if (!d || !d.success || !d.data || d.data.done) {
+                            importWorkerRunning = false;
+                            return;
+                        }
+                        const id = String(d.data.source_product_id);
+                        const status = d.data.import_status;
+                        setRowStatus(id, status, d.data.error_message || '');
+                        const btn = document.querySelector('.hci-import-btn[data-id="' + id + '"]');
+                        if (btn) {
+                            if (status === 'error' || status === 'partial') {
+                                btn.disabled = false;
+                                btn.textContent = 'تلاش مجدد';
+                            } else {
+                                btn.remove();
+                            }
+                        }
+                        if (pendingIds.has(id)) {
+                            pendingIds.delete(id);
+                            doneCount++;
+                            updateCounter();
+                        }
+                        runImportWorkerStep();
+                    })
+                    .catch(function () { importWorkerRunning = false; });
+            }
+            function startImportWorker() {
+                if (importWorkerRunning) return;
+                importWorkerRunning = true;
+                runImportWorkerStep();
+            }
+
             function buildEntry(row) {
                 let entry = {};
                 try { entry = JSON.parse(row.getAttribute('data-entry') || '{}'); } catch (e) { entry = {}; }
@@ -880,8 +1036,10 @@ final class HCI_Products {
                                 totalQueued++;
                                 pendingIds.add(id);
                                 markQueuedUI(id);
+                                removeFromLocalSelection(id);
                                 updateCounter();
                                 startPolling();
+                                startImportWorker();
                             } else {
                                 btn.disabled = false;
                                 alert((d && d.data && d.data.message) ? d.data.message : 'خطا در صف‌بندی.');
@@ -928,6 +1086,7 @@ final class HCI_Products {
                                     totalQueued++;
                                     pendingIds.add(id);
                                     markQueuedUI(id);
+                                    removeFromLocalSelection(id);
                                 } else {
                                     const btn = row.querySelector('.hci-import-btn');
                                     if (btn) { btn.disabled = false; }
@@ -935,6 +1094,7 @@ final class HCI_Products {
                             });
                             updateCounter();
                             startPolling();
+                            startImportWorker();
                         })
                         .catch(function () {
                             batchBtn.disabled = false;

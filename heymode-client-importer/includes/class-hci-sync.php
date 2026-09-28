@@ -280,11 +280,11 @@ final class HCI_Sync {
         }
 
         if (array_key_exists('stock_quantity', $item)) {
-            $new_quantity = $item['stock_quantity'] !== null ? (float) $item['stock_quantity'] : 0.0;
-            if ((float) $product->get_stock_quantity() !== $new_quantity) {
-                $product->set_manage_stock(true);
-                $product->set_stock_quantity($new_quantity);
-                $product->set_stock_status($new_quantity > 0 ? 'instock' : 'outofstock');
+            // همان قاعده مشترک Import: stock_quantity=NULL یعنی مدیریت
+            // موجودی در مبدا خاموش است — manage_stock را روشن نمی‌کند، فقط
+            // stock_status خام مبدا را منعکس می‌کند (نه outofstock حدسی).
+            $stock_changed = HCI_Import::apply_stock($product, $item['stock_quantity'] ?? null, $item['stock_status'] ?? null);
+            if ($stock_changed) {
                 $changed = true;
                 $outcome['stock_updated'] = true;
             }

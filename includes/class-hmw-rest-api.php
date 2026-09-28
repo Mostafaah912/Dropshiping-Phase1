@@ -582,6 +582,7 @@ final class HMW_REST_API {
                     'attributes' => $child_attributes,
                     'price' => $child['price'] !== null ? (string) $child['price'] : null,
                     'stock_quantity' => $child['stock_quantity'] !== null ? (float) $child['stock_quantity'] : null,
+                    'stock_status' => (string) ($child['stock_status'] ?? ''),
                     'sku' => $child['sku'] !== null ? (string) $child['sku'] : null,
                 );
             }, $children);
@@ -617,7 +618,7 @@ final class HMW_REST_API {
         ));
 
         $changed = $wpdb->get_results($wpdb->prepare(
-            "SELECT source_product_id, parent_product_id, sku, price, stock_quantity, is_active FROM {$table} WHERE updated_at > %s ORDER BY source_product_id ASC LIMIT %d OFFSET %d",
+            "SELECT source_product_id, parent_product_id, sku, price, stock_quantity, stock_status, is_active FROM {$table} WHERE updated_at > %s ORDER BY source_product_id ASC LIMIT %d OFFSET %d",
             $updated_after,
             $per_page,
             $offset
@@ -652,6 +653,7 @@ final class HMW_REST_API {
                     'sku' => null,
                     'price' => null,
                     'stock_quantity' => null,
+                    'stock_status' => null,
                     'is_active' => null,
                     'variations' => array(),
                 );
@@ -661,6 +663,7 @@ final class HMW_REST_API {
                 'sku' => $row['sku'] !== null ? (string) $row['sku'] : null,
                 'price' => $row['price'] !== null ? (string) $row['price'] : null,
                 'stock_quantity' => $row['stock_quantity'] !== null ? (float) $row['stock_quantity'] : null,
+                'stock_status' => (string) ($row['stock_status'] ?? ''),
                 'is_active' => (bool) $row['is_active'],
             );
             if (empty($base_filled[$parent_id])) {
@@ -672,7 +675,7 @@ final class HMW_REST_API {
         if ($needed_parent_ids) {
             $placeholders = implode(',', array_fill(0, count($needed_parent_ids), '%d'));
             $parent_rows = $wpdb->get_results($wpdb->prepare(
-                "SELECT source_product_id, sku, price, stock_quantity, is_active FROM {$table} WHERE source_product_id IN ({$placeholders})",
+                "SELECT source_product_id, sku, price, stock_quantity, stock_status, is_active FROM {$table} WHERE source_product_id IN ({$placeholders})",
                 $needed_parent_ids
             ), ARRAY_A);
             foreach ((array) $parent_rows as $prow) {
@@ -683,6 +686,7 @@ final class HMW_REST_API {
                 $items_by_id[$pid]['sku'] = $prow['sku'] !== null ? (string) $prow['sku'] : null;
                 $items_by_id[$pid]['price'] = $prow['price'] !== null ? (string) $prow['price'] : null;
                 $items_by_id[$pid]['stock_quantity'] = $prow['stock_quantity'] !== null ? (float) $prow['stock_quantity'] : null;
+                $items_by_id[$pid]['stock_status'] = (string) ($prow['stock_status'] ?? '');
                 $items_by_id[$pid]['is_active'] = (bool) $prow['is_active'];
             }
         }
@@ -718,6 +722,7 @@ final class HMW_REST_API {
             'sku' => $row['sku'] !== null ? (string) $row['sku'] : null,
             'price' => $row['price'] !== null ? (string) $row['price'] : null,
             'stock_quantity' => $row['stock_quantity'] !== null ? (float) $row['stock_quantity'] : null,
+            'stock_status' => (string) ($row['stock_status'] ?? ''),
             'is_active' => (bool) $row['is_active'],
         );
     }

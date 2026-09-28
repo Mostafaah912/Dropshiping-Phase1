@@ -94,8 +94,39 @@ final class HCI_Admin {
                 <div class="notice notice-error is-dismissible"><p>تست اتصال ناموفق بود. جزئیات: <?php echo esc_html((string) get_transient('hci_last_test_message')); ?></p></div>
             <?php elseif ($notice === 'pricing_saved') : ?>
                 <div class="notice notice-success is-dismissible"><p>تنظیمات قیمت‌گذاری ذخیره شد.</p></div>
-            <?php elseif ($notice === 'data_reset') : ?>
-                <div class="notice notice-success is-dismissible"><p>داده‌ها ریست شدند: جدول ردیابی، صف‌های Action Scheduler و کش محصولات کاملاً پاک شدند.</p></div>
+            <?php elseif ($notice === 'data_reset') :
+                $reset_result = get_transient('hci_reset_result_' . get_current_user_id());
+                delete_transient('hci_reset_result_' . get_current_user_id());
+                $reset_result = is_array($reset_result) ? $reset_result : array();
+                ?>
+                <div class="notice notice-success is-dismissible">
+                    <p>
+                        <?php printf(
+                            'ریست انجام شد: %s ردیف جدول، %s مورد در صف (Action Scheduler)، %s کش، %s انتخاب ذخیره‌شده کاربران پاک شد.',
+                            '<strong>' . esc_html((string) ($reset_result['rows_cleared'] ?? 0)) . '</strong>',
+                            '<strong>' . esc_html((string) ($reset_result['queue_cleared'] ?? 0)) . '</strong>',
+                            '<strong>' . esc_html((string) ($reset_result['cache_cleared'] ?? 0)) . '</strong>',
+                            '<strong>' . esc_html((string) ($reset_result['selection_cleared'] ?? 0)) . '</strong>'
+                        ); ?>
+                        <?php if (isset($reset_result['deleted_products'])) : ?>
+                            <br><?php printf(
+                                'همچنین %s محصول و %s تصویر ساخته‌شده توسط این پلاگین حذف شد.',
+                                '<strong>' . esc_html((string) $reset_result['deleted_products']) . '</strong>',
+                                '<strong>' . esc_html((string) $reset_result['deleted_images']) . '</strong>'
+                            ); ?>
+                        <?php endif; ?>
+                    </p>
+                </div>
+                <script>
+                (function () {
+                    // ریست سمت سرور کامل شد؛ انتخاب‌های محلی مرورگر (localStorage
+                    // صفحه محصولات) هم پاک می‌شود تا چک‌باکس‌های قدیمی/کش‌شده
+                    // دوباره تیک‌خورده دیده نشوند.
+                    try { localStorage.removeItem('hci_selection_v1_' + <?php echo (int) get_current_user_id(); ?>); } catch (e) {}
+                })();
+                </script>
+            <?php elseif ($notice === 'delete_confirm_mismatch') : ?>
+                <div class="notice notice-error is-dismissible"><p>عبارت تأیید حذف اشتباه بود — هیچ‌چیزی حذف/ریست نشد. دوباره تلاش کنید.</p></div>
             <?php endif; ?>
 
             <h2 class="nav-tab-wrapper">
@@ -187,6 +218,16 @@ final class HCI_Admin {
                             </select>
                         </td>
                     </tr>
+                    <tr>
+                        <th><label for="hci_apply_categories">دسته‌بندی‌های هی‌مد</label></th>
+                        <td>
+                            <label>
+                                <input type="checkbox" id="hci_apply_categories" name="apply_categories" value="1" <?php checked(HCI_Import::should_apply_categories()); ?>>
+                                دسته‌بندی‌های هی‌مد در سایت من ساخته و اعمال شود
+                            </label>
+                            <p style="color:#787c82;margin-top:4px">پیش‌فرض: بله. اگر خاموش کنید، هیچ دسته‌ای ساخته/اعمال نمی‌شود و محصولات Import‌شده دسته پیش‌فرض ووکامرس (Uncategorized) را می‌گیرند.</p>
+                        </td>
+                    </tr>
                 </tbody>
             </table>
 
@@ -231,30 +272,65 @@ final class HCI_Admin {
         <?php
     }
 
+    private const DELETE_CONFIRM_WORD = 'حذف';
+
     private static function render_reset_tab(): void {
         ?>
         <h2>ریست داده‌ها</h2>
-        <p>این عملیات موارد زیر را کاملاً پاک می‌کند:</p>
+        <p>این عملیات موارد زیر را کاملاً پاک می‌کند (و در پیام بعد از اجرا، تعداد واقعی هر مورد را نشان می‌دهد):</p>
         <ul style="list-style:disc;padding-right:20px">
             <li>جدول ردیابی Import (<code>wp_hci_product_map</code>) — همه رکوردهای Imported/Duplicate/Partial/Error/در صف.</li>
             <li>صف‌های Action Scheduler این پلاگین — هم Importهای در حال انتظار، هم زمان‌بندی سینک روزانه (که بلافاصله دوباره خودکار زمان‌بندی می‌شود).</li>
             <li>کش محصولات منبع (صفحه محصولات، شامل هر حالت نیمه‌کاره ناشی از Rate Limit).</li>
+            <li>انتخاب‌های ذخیره‌شده (Transient) همه کارمندان در صفحه محصولات.</li>
         </ul>
-        <p><strong>توجه:</strong> این کار هیچ محصولی را از ووکامرس حذف نمی‌کند و روی محصولات از قبل Import‌شده در سایت اثری ندارد — فقط ردیابی/صف/کش این پلاگین پاک می‌شود؛ یعنی بعد از ریست، محصولات قبلاً Import‌شده دیگر به‌عنوان «قبلاً Import‌شده» شناخته نمی‌شوند و سینک روزانه دیگر آن‌ها را به‌روز نمی‌کند تا دوباره از صفحه محصولات Import شوند. تنظیمات اتصال/قیمت‌گذاری و Cursor سینک دست‌نخورده می‌مانند.</p>
-        <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>"
-            onsubmit="return confirm('مطمئنید؟ این کار جدول ردیابی، صف‌های Import/سینک، و کش محصولات را کاملاً پاک می‌کند و برگشت‌پذیر نیست.');">
+        <p><strong>توجه:</strong> این کار به‌تنهایی هیچ محصولی را از ووکامرس حذف نمی‌کند — فقط ردیابی/صف/کش این پلاگین پاک می‌شود؛ یعنی بعد از ریست، محصولات قبلاً Import‌شده دیگر به‌عنوان «قبلاً Import‌شده» شناخته نمی‌شوند (Duplicate‌بودن دوباره بررسی می‌شود) و سینک روزانه دیگر آن‌ها را به‌روز نمی‌کند تا دوباره از صفحه محصولات Import شوند. تنظیمات اتصال/قیمت‌گذاری و Cursor سینک دست‌نخورده می‌مانند.</p>
+
+        <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" id="hci-reset-form"
+            onsubmit="return hciConfirmReset();">
             <input type="hidden" name="action" value="hci_reset_data">
             <?php wp_nonce_field('hci_reset_data'); ?>
+
+            <div style="border:1px solid #d63638;border-radius:4px;padding:12px;margin:16px 0;max-width:640px">
+                <label>
+                    <input type="checkbox" id="hci-delete-products-checkbox" name="delete_products" value="1">
+                    <strong>همچنین محصولات و تصاویری که این پلاگین ساخته را هم حذف کن</strong>
+                </label>
+                <p style="margin:6px 0 0;color:#787c82">فقط محصولاتی که با متای <code>_hci_source_product_id</code> مشخص شده‌اند (یا برای رکوردهای قدیمی، از طریق <code>dest_product_id</code> جدول ردیابی) — هیچ محصول دیگری در سایت هرگز حذف نمی‌شود. پیش‌فرض خاموش است.</p>
+                <p style="margin:10px 0 0">
+                    <label for="hci-delete-confirm-text">برای تأیید، عبارت «<strong><?php echo esc_html(self::DELETE_CONFIRM_WORD); ?></strong>» را اینجا تایپ کنید:</label><br>
+                    <input type="text" id="hci-delete-confirm-text" name="delete_confirm_text" class="regular-text" autocomplete="off">
+                </p>
+            </div>
+
             <button type="submit" class="button button-secondary" style="color:#a00;border-color:#a00">ریست داده‌ها</button>
         </form>
+        <script>
+        function hciConfirmReset() {
+            const deleteChecked = document.getElementById('hci-delete-products-checkbox').checked;
+            if (deleteChecked) {
+                const confirmText = document.getElementById('hci-delete-confirm-text').value.trim();
+                if (confirmText !== <?php echo wp_json_encode(self::DELETE_CONFIRM_WORD); ?>) {
+                    alert('برای حذف محصولات باید عبارت تأیید را دقیقاً همان‌طور که نوشته شده تایپ کنید.');
+                    return false;
+                }
+                return confirm('مطمئنید؟ این کار هم داده‌های ردیابی را ریست می‌کند هم محصولات/تصاویر ساخته‌شده توسط این پلاگین را برای همیشه حذف می‌کند — برگشت‌پذیر نیست.');
+            }
+            return confirm('مطمئنید؟ این کار جدول ردیابی، صف‌های Import/سینک، و کش محصولات را کاملاً پاک می‌کند و برگشت‌پذیر نیست.');
+        }
+        </script>
         <?php
     }
 
     /**
      * منطق واقعی ریست — جدا از handle_reset_data() (که Nonce/Capability را
      * چک و در پایان Redirect+exit می‌کند) تا مستقل و بدون HTTP قابل تست باشد.
+     * خروجی تعداد واقعی هر مورد پاک‌شده را برمی‌گرداند تا پیام موفقیت هرگز
+     * یک جمله ثابت/گمراه‌کننده نباشد.
      */
     public static function reset_data(): array {
+        // قبل از truncate شمرده می‌شود — بعد از آن دیگر قابل شمارش نیست.
+        $queue_cleared = HCI_DB::count_queued_or_processing();
         $rows_cleared = HCI_DB::truncate_product_map();
 
         if (function_exists('as_unschedule_all_actions')) {
@@ -268,14 +344,114 @@ final class HCI_Admin {
         }
         HCI_Sync::reset_retry_state();
 
-        HCI_Source_Client::clear_all_cache();
+        $cache_cleared = HCI_Source_Client::clear_all_cache();
+        $selection_cleared = self::clear_all_selection_transients();
 
-        return array('rows_cleared' => $rows_cleared);
+        return array(
+            'rows_cleared' => $rows_cleared,
+            'queue_cleared' => $queue_cleared,
+            'cache_cleared' => $cache_cleared,
+            'selection_cleared' => $selection_cleared,
+        );
+    }
+
+    /**
+     * هیچ فهرست مرکزی‌ای از «کدام کاربران Selection ذخیره‌شده دارند» وجود
+     * ندارد (Transient است، نه یک جدول)، پس همه کاربرهای واقعی سایت را
+     * می‌گیریم و برای هر کدام کلید مخصوص همان کاربر را چک می‌کنیم — به‌جای
+     * یک Query خام روی wp_options که با ساختار داخلی Transient/Object Cache
+     * (که ممکن است اصلاً SQL نباشد) شکننده می‌شد.
+     */
+    private static function clear_all_selection_transients(): int {
+        if (!function_exists('get_users')) {
+            return 0;
+        }
+        $user_ids = (array) get_users(array('fields' => 'ID'));
+        $cleared = 0;
+        foreach ($user_ids as $user_id) {
+            $key = HCI_Products::SELECTION_TRANSIENT_PREFIX . (int) $user_id;
+            if (get_transient($key) !== false) {
+                delete_transient($key);
+                $cleared++;
+            }
+        }
+        return $cleared;
+    }
+
+    /**
+     * گزینه اختیاری/پیش‌فرض‌خاموش: فقط محصولاتی که واقعاً این پلاگین ساخته
+     * (با متای _hci_source_product_id، یا برای رکوردهای قدیمی‌تر از قبل از
+     * اضافه‌شدن این Meta، از طریق dest_product_id جدول ردیابی) و فقط
+     * تصاویری که همین پلاگین دانلود کرده (متای _hci_imported) حذف می‌شوند.
+     * باید قبل از reset_data()/truncate_product_map() صدا زده شود، وگرنه
+     * dest_product_id ردیف‌های قدیمی از دست می‌رود.
+     */
+    public static function delete_plugin_created_products(): array {
+        $meta_ids = array();
+        if (function_exists('get_posts')) {
+            $meta_ids = array_map('intval', (array) get_posts(array(
+                'post_type' => 'product',
+                'meta_key' => HCI_Import::SOURCE_PRODUCT_META_KEY,
+                'posts_per_page' => -1,
+                'fields' => 'ids',
+            )));
+        }
+        $legacy_ids = HCI_DB::get_all_dest_product_ids();
+        $all_ids = array_values(array_unique(array_merge($meta_ids, $legacy_ids)));
+
+        $deleted_products = 0;
+        $deleted_images = 0;
+
+        foreach ($all_ids as $product_id) {
+            if (function_exists('wc_get_product')) {
+                $product = wc_get_product($product_id);
+                if ($product) {
+                    $image_ids = array_values(array_unique(array_filter(array_map('intval', array_merge(
+                        array($product->get_image_id()),
+                        (array) $product->get_gallery_image_ids()
+                    )))));
+                    foreach ($image_ids as $image_id) {
+                        // فقط تصویری که خودِ پلاگین دانلود کرده حذف می‌شود —
+                        // نه تصویری که کارمند دستی از رسانه انتخاب کرده بود.
+                        if (get_post_meta($image_id, HCI_Import::IMAGE_META_KEY, true)) {
+                            if (function_exists('wp_delete_attachment') && wp_delete_attachment($image_id, true)) {
+                                $deleted_images++;
+                            }
+                        }
+                    }
+                }
+            }
+            if (function_exists('wp_delete_post') && wp_delete_post($product_id, true)) {
+                $deleted_products++;
+            }
+        }
+
+        return array('deleted_products' => $deleted_products, 'deleted_images' => $deleted_images);
     }
 
     public static function handle_reset_data(): void {
         self::guard('hci_reset_data');
-        self::reset_data();
+
+        $want_delete_products = !empty($_POST['delete_products']);
+        $delete_result = null;
+
+        if ($want_delete_products) {
+            $confirm_text = isset($_POST['delete_confirm_text']) ? trim((string) wp_unslash($_POST['delete_confirm_text'])) : '';
+            if ($confirm_text !== self::DELETE_CONFIRM_WORD) {
+                wp_safe_redirect(add_query_arg(array('page' => 'heymode-client-importer', 'tab' => 'reset', 'hci_notice' => 'delete_confirm_mismatch'), admin_url('admin.php')));
+                exit;
+            }
+            // قبل از reset_data() (که truncate هم می‌کند) صدا زده می‌شود، وگرنه
+            // dest_product_id رکوردهای قدیمی‌تر بدون Meta از دست می‌رود.
+            $delete_result = self::delete_plugin_created_products();
+        }
+
+        $result = self::reset_data();
+        if ($delete_result !== null) {
+            $result = array_merge($result, $delete_result);
+        }
+
+        set_transient('hci_reset_result_' . get_current_user_id(), $result, MINUTE_IN_SECONDS);
         wp_safe_redirect(add_query_arg(array('page' => 'heymode-client-importer', 'tab' => 'reset', 'hci_notice' => 'data_reset'), admin_url('admin.php')));
         exit;
     }
@@ -307,6 +483,7 @@ final class HCI_Admin {
         $percent = isset($_POST['percent']) ? (float) $_POST['percent'] : 0.0;
         $default_status = isset($_POST['default_status']) ? sanitize_key(wp_unslash($_POST['default_status'])) : 'draft';
         HCI_Pricing::save($fixed_amount, $percent, $default_status);
+        update_option('hci_apply_categories', !empty($_POST['apply_categories']), false);
         wp_safe_redirect(add_query_arg(array('page' => 'heymode-client-importer', 'tab' => 'pricing', 'hci_notice' => 'pricing_saved'), admin_url('admin.php')));
         exit;
     }

@@ -33,6 +33,8 @@ final class HCI_DB {
             import_payload LONGTEXT NULL,
             error_message TEXT NULL,
             last_synced_at DATETIME NULL,
+            started_at DATETIME NULL,
+            finished_at DATETIME NULL,
             import_status VARCHAR(20) NOT NULL DEFAULT 'pending',
             created_at DATETIME NOT NULL,
             updated_at DATETIME NOT NULL,
@@ -90,6 +92,28 @@ final class HCI_DB {
             ), ARRAY_A);
         }
         return $row ?: null;
+    }
+
+    /**
+     * شناسه‌هایی که واقعاً باید کارت‌شان در گرید غیرفعال شود: Import کامل شده
+     * (imported) یا الان در حال پردازش/صف است (queued/processing — برای
+     * جلوگیری از صف‌بندی دوباره‌ی هم‌زمان). عمداً error/partial/duplicate را
+     * شامل نمی‌شود — برخلاف نسخه قبلی (get_imported_source_ids، که هر ردیفی
+     * با هر وضعیتی را «قبلاً ثبت شده» می‌دانست)، چون همان رفتار باعث می‌شد
+     * محصولی که Import‌اش شکست خورد یا در صف کند/خراب گیر کرد، برای همیشه از
+     * گرید غیرفعال و غیرقابل‌انتخاب دوباره بماند — دقیقاً همان چیزی که باعث
+     * می‌شد «اضافه» در مودال دیگر هرگز محصول را به جدول بازبینی نرساند.
+     */
+    public static function get_grid_locked_source_ids(): array {
+        global $wpdb;
+        $table = self::product_map_table();
+        $rows = $wpdb->get_col($wpdb->prepare(
+            "SELECT DISTINCT source_product_id FROM {$table} WHERE source_variation_id IS NULL AND import_status IN (%s, %s, %s)",
+            self::STATUS_IMPORTED,
+            self::STATUS_QUEUED,
+            self::STATUS_PROCESSING
+        ));
+        return array_values(array_map('intval', is_array($rows) ? $rows : array()));
     }
 
     public static function get_imported_source_skus(): array {
@@ -169,22 +193,70 @@ final class HCI_DB {
         return array('success' => true, 'id' => (int) $wpdb->insert_id);
     }
 
-    public static function mark_processing(int $source_product_id): void {
+    /**
+     * قفل‌های قدیمی (ردیف‌هایی که processing مانده‌اند ولی started_at از حد
+     * مشخص قدیمی‌تر است — یعنی کارگری که وسط کار قطع/کرش شده) را به queued
+     * برمی‌گرداند تا دوباره Claim‌پذیر شوند. هم مسیر AJAX (hci_import_next)
+     * هم Action Scheduler قبل از Claim کردن این را صدا می‌زنند.
+     */
+    public static function release_stale_locks(int $stale_after_seconds = 300): int {
         global $wpdb;
-        // عمداً با id (کلید اصلی) نه source_product_id+source_variation_id=NULL
-        // فیلتر می‌کنیم: wpdb::update() مقدار null در آرایه‌ی $where را به‌شکل
-        // ستون‌های نسخه‌های قدیمی به‌صورت «= NULL» می‌سازد که در SQL هرگز
-        // Match نمی‌شود (باید IS NULL باشد) — استفاده از id این ابهام را کلاً
-        // کنار می‌زند.
+        $table = self::product_map_table();
+        $threshold = gmdate('Y-m-d H:i:s', time() - $stale_after_seconds);
+        $result = $wpdb->query($wpdb->prepare(
+            "UPDATE {$table} SET import_status = %s, updated_at = %s WHERE import_status = %s AND started_at IS NOT NULL AND started_at < %s",
+            self::STATUS_QUEUED,
+            current_time('mysql', true),
+            self::STATUS_PROCESSING,
+            $threshold
+        ));
+        return $result === false ? 0 : (int) $result;
+    }
+
+    /**
+     * Claim اتمیک یک ردیف مشخص: فقط اگر هنوز واقعاً 'queued' باشد به
+     * 'processing' تغییر می‌کند (UPDATE ... WHERE id=... AND
+     * import_status='queued' — همان شرطی که تضمین می‌کند اگر یک کارگر
+     * دیگر (مسیر AJAX یا Action Scheduler) هم‌زمان همین ردیف را می‌خواست،
+     * فقط یکی از آن‌ها affected_rows=1 می‌گیرد و دیگری صفر — بدون نیاز به
+     * قفل صریح دیتابیس). خروجی null یعنی ردیف یا وجود ندارد یا کس دیگری
+     * از قبل بُرده — کالر باید بی‌صدا صرف‌نظر کند، نه دوباره پردازش کند.
+     */
+    public static function claim_specific(int $source_product_id): ?array {
+        global $wpdb;
         $row = self::get_map_row($source_product_id);
-        if (!$row) {
-            return;
+        if (!$row || $row['import_status'] !== self::STATUS_QUEUED) {
+            return null;
         }
-        $wpdb->update(
+        $now = current_time('mysql', true);
+        $affected = $wpdb->update(
             self::product_map_table(),
-            array('import_status' => self::STATUS_PROCESSING, 'updated_at' => current_time('mysql', true)),
-            array('id' => (int) $row['id'])
+            array('import_status' => self::STATUS_PROCESSING, 'started_at' => $now, 'updated_at' => $now),
+            array('id' => (int) $row['id'], 'import_status' => self::STATUS_QUEUED)
         );
+        if ((int) $affected !== 1) {
+            return null;
+        }
+        return array('id' => (int) $row['id'], 'source_product_id' => $source_product_id);
+    }
+
+    /**
+     * برای کارگر سمت مرورگر (hci_import_next): قدیمی‌ترین ردیف queued را
+     * پیدا و همان‌جا اتمیک Claim می‌کند. همان تضمین بالا را دارد؛ اگر بین
+     * SELECT و UPDATE کس دیگری برد، null برمی‌گردد (نه خطا) — JS باید
+     * ساده دوباره صدا بزند.
+     */
+    public static function claim_next_queued(): ?array {
+        global $wpdb;
+        $table = self::product_map_table();
+        $row = $wpdb->get_row($wpdb->prepare(
+            "SELECT id, source_product_id FROM {$table} WHERE import_status = %s AND source_variation_id IS NULL ORDER BY id ASC LIMIT 1",
+            self::STATUS_QUEUED
+        ), ARRAY_A);
+        if (!$row) {
+            return null;
+        }
+        return self::claim_specific((int) $row['source_product_id']);
     }
 
     /**
@@ -198,14 +270,15 @@ final class HCI_DB {
         if (!$row) {
             return;
         }
-        $update = array('updated_at' => current_time('mysql', true));
+        $now = current_time('mysql', true);
+        $update = array('updated_at' => $now, 'finished_at' => $now);
         foreach (array('dest_product_id', 'dest_sku', 'import_status', 'error_message') as $field) {
             if (array_key_exists($field, $data)) {
                 $update[$field] = $data[$field];
             }
         }
         if (($data['import_status'] ?? '') === self::STATUS_IMPORTED) {
-            $update['last_synced_at'] = current_time('mysql', true);
+            $update['last_synced_at'] = $now;
         }
         $wpdb->update(
             self::product_map_table(),
@@ -323,5 +396,35 @@ final class HCI_DB {
         global $wpdb;
         $result = $wpdb->query('DELETE FROM ' . self::product_map_table());
         return $result === false ? 0 : (int) $result;
+    }
+
+    /**
+     * برای پیام دقیق دکمه «ریست داده‌ها» («۱۲ صف پاک شد»): چند ردیف الان
+     * واقعاً در صف Action Scheduler هستند (queued/processing) — باید قبل از
+     * truncate_product_map() صدا زده شود.
+     */
+    public static function count_queued_or_processing(): int {
+        global $wpdb;
+        $table = self::product_map_table();
+        $count = $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM {$table} WHERE import_status IN (%s, %s)",
+            self::STATUS_QUEUED,
+            self::STATUS_PROCESSING
+        ));
+        return (int) $count;
+    }
+
+    /**
+     * فقط برای گزینه اختیاری «حذف محصولات ساخته‌شده توسط این پلاگین»: قبل
+     * از خالی‌شدن جدول، dest_product_id همه ردیف‌ها را برمی‌گرداند — برای
+     * ردیف‌های قدیمی‌تری که هنوز متای _hci_source_product_id ندارند (از
+     * قبل از اضافه‌شدن آن Meta)، این تنها راه شناسایی محصول ساخته‌شده است.
+     */
+    public static function get_all_dest_product_ids(): array {
+        global $wpdb;
+        $rows = $wpdb->get_col(
+            'SELECT DISTINCT dest_product_id FROM ' . self::product_map_table() . ' WHERE dest_product_id IS NOT NULL'
+        );
+        return array_values(array_map('intval', is_array($rows) ? $rows : array()));
     }
 }

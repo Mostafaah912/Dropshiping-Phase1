@@ -61,22 +61,93 @@ test_assert($dup3Retry === null, 'لایه ۳ در حالت Retry: اگر SKU م
 // =============================================================================
 // تست ۳ — سلسله‌مراتب دسته‌بندی: تطبیق نام+Parent، بدون تکرار
 // =============================================================================
+test_section('تست ۲/۵ — توضیح کوتاه HTML‌دار با wp_kses_post پاک‌سازی می‌شود، نه sanitize_text_field (که تگ‌ها را کاملاً حذف می‌کند)');
+
+$sanitizeReflection = new ReflectionClass('HCI_Import');
+$sanitizeMethod = $sanitizeReflection->getMethod('sanitize_payload');
+$sanitizeMethod->setAccessible(true);
+$sanitizedWithHtml = $sanitizeMethod->invoke(null, array(
+    'name' => 'محصول با توضیح HTML‌دار',
+    'short_description' => '<ul><li>ویژگی یک</li><li>ویژگی دو</li></ul>',
+));
+test_evidence('short_description بعد از sanitize_payload()', $sanitizedWithHtml['short_description']);
+test_assert(
+    str_contains($sanitizedWithHtml['short_description'], '<ul>') && str_contains($sanitizedWithHtml['short_description'], '<li>'),
+    'مورد ۸: تگ‌های HTML مجاز (ul/li) حفظ شدند — یعنی از wp_kses_post استفاده شده، نه از تابعی که همه تگ‌ها را حذف می‌کند'
+);
+
 test_section('تست ۳ — HCI_Import::resolve_category_hierarchy()');
 
 hci_test_reset_wc_fakes();
 
-$leaf1 = HCI_Import::resolve_category_hierarchy(array('پوشاک', 'کفش'));
+function hci_cat_node(int $id, string $name, ?int $parent_id, string $slug = ''): array {
+    return array('id' => $id, 'name' => $name, 'slug' => $slug, 'parent_id' => $parent_id);
+}
+
+$leaf1 = HCI_Import::resolve_category_hierarchy(array(
+    hci_cat_node(1, 'پوشاک', null),
+    hci_cat_node(2, 'کفش', 1, 'kafsh'),
+));
 test_assert(count($leaf1) === 1, 'فقط شناسه برگ برمی‌گردد');
 $leaf1Id = $leaf1[0];
 test_assert(count($GLOBALS['__fake_wc_terms']['product_cat'] ?? array()) === 2, 'دقیقاً ۲ Term (ریشه+برگ) ساخته شده');
+test_assert(($GLOBALS['__fake_wc_terms']['product_cat'][$leaf1Id]['slug'] ?? '') === 'kafsh', 'Slug همان چیزی که مبدا داد («kafsh») روی Term جدید ست شده');
 
-$leaf1Again = HCI_Import::resolve_category_hierarchy(array('پوشاک', 'کفش'));
+$leaf1Again = HCI_Import::resolve_category_hierarchy(array(
+    hci_cat_node(1, 'پوشاک', null),
+    hci_cat_node(2, 'کفش', 1, 'kafsh'),
+));
 test_assert($leaf1Again[0] === $leaf1Id, 'صدازدن دوباره با همان نام‌ها همان Term موجود را برمی‌گرداند، نه یک کپی جدید');
 test_assert(count($GLOBALS['__fake_wc_terms']['product_cat'] ?? array()) === 2, 'هنوز فقط ۲ Term — هیچ تکراری ساخته نشد');
 
-$leaf2 = HCI_Import::resolve_category_hierarchy(array('پوشاک بچه', 'کفش'));
+$leaf2 = HCI_Import::resolve_category_hierarchy(array(
+    hci_cat_node(3, 'پوشاک بچه', null),
+    hci_cat_node(4, 'کفش', 3),
+));
 test_assert($leaf2[0] !== $leaf1Id, 'نام "کفش" زیر یک Parent متفاوت ("پوشاک بچه")، Term تازه می‌سازد — تطبیق دقیقاً نام+Parent است، نه فقط نام');
 test_assert(count($GLOBALS['__fake_wc_terms']['product_cat'] ?? array()) === 4, 'حالا ۴ Term: پوشاک، کفش(زیر پوشاک)، پوشاک بچه، کفش(زیر پوشاک بچه)');
+
+// اگر مبدا عمداً همان Slug صریح را برای دو دسته متفاوت بدهد (مثلاً باگ/
+// هم‌نامی در مبدا)، وردپرس خودش یکتا می‌کند — رفتاری که باید مستند/حفظ شود.
+$dupSlugLeaf = HCI_Import::resolve_category_hierarchy(array(hci_cat_node(5, 'دسته دیگر', null, 'kafsh')));
+test_assert(($GLOBALS['__fake_wc_terms']['product_cat'][$dupSlugLeaf[0]]['slug'] ?? '') === 'kafsh-2', 'Slug صریح تکراری («kafsh») با پسوند یکتا می‌شود، نه این‌که به دسته اشتباه Match شود');
+
+// =============================================================================
+// این دقیقاً همان رگرسیون گزارش‌شده است: قبلاً کد فرض می‌کرد آیتم i همیشه
+// Parentِ آیتم i+1 است (زنجیره صرفاً ترتیبی). وقتی دو Node در category_path
+// واقعاً خواهر و برادر باشند (هر دو زیر همان Parent، نه زیر هم)، آن فرض غلط
+// یکی را به‌اشتباه زیر دیگری می‌ساخت. اینجا با parent_id صریح تست می‌شود.
+// =============================================================================
+hci_test_reset_wc_fakes();
+$siblingResult = HCI_Import::resolve_category_hierarchy(array(
+    hci_cat_node(10, 'آ', null),
+    hci_cat_node(11, 'ب', 10), // فرزند آ
+    hci_cat_node(12, 'پ', 10), // خواهرِ ب، نه فرزندِ ب — هر دو زیر آ
+));
+$terms = $GLOBALS['__fake_wc_terms']['product_cat'];
+test_evidence('Termهای ساخته‌شده برای سه‌گانه خواهر/برادر (آ → ب و آ → پ)', $terms);
+test_assert(count($terms) === 3, 'دقیقاً ۳ Term ساخته شد (آ، ب، پ)');
+$rootId = null;
+$bId = null;
+$pId = null;
+foreach ($terms as $tid => $t) {
+    if ($t['name'] === 'آ') { $rootId = $tid; }
+    if ($t['name'] === 'ب') { $bId = $tid; }
+    if ($t['name'] === 'پ') { $pId = $tid; }
+}
+test_assert($terms[$bId]['parent'] === $rootId, 'رگرسیون رفع شد: «ب» درست زیر «آ» ساخته شده');
+test_assert($terms[$pId]['parent'] === $rootId, 'رگرسیون رفع شد: «پ» هم درست زیر «آ» ساخته شده — نه زیر «ب» (که فرض ترتیبی قدیم اشتباه می‌ساخت)');
+test_assert($siblingResult[0] === $pId, 'شناسه برگ برگردانده‌شده، آخرین Node پردازش‌شده (پ) است');
+
+// =============================================================================
+// سازگاری با مبدای قدیمی‌تر که اصلاً Slug نمی‌دهد: نباید کرش کند، باید از
+// روی نام یک Slug بسازد (رفتار پیش‌فرض خودِ وردپرس).
+// =============================================================================
+hci_test_reset_wc_fakes();
+$noSlugResult = HCI_Import::resolve_category_hierarchy(array(hci_cat_node(1, 'دسته بدون اسلاگ', null, '')));
+test_assert(count($noSlugResult) === 1, 'بدون Slug از مبدا هم کرش نمی‌کند و Term ساخته می‌شود');
+$noSlugTermId = $noSlugResult[0];
+test_assert(($GLOBALS['__fake_wc_terms']['product_cat'][$noSlugTermId]['slug'] ?? '') !== '', 'وقتی مبدا Slug نداد، از روی نام یک Slug ساخته شده (نه خالی)');
 
 // =============================================================================
 // تست ۴ — Import کامل محصول Simple (شامل فرمول قیمت واقعی + Stock + وضعیت نهایی)
@@ -93,7 +164,7 @@ $simplePayload = array(
     'short_description' => 'توضیح کوتاه',
     'featured_image' => 'https://example.test/f.jpg',
     'images' => array('https://example.test/g1.jpg'),
-    'category_names' => array('آرایشی'),
+    'category_path' => array(hci_cat_node(50, 'آرایشی', null)),
     'product_type' => 'simple',
     'sku' => 'hmp-500',
     'price' => '100000',
@@ -132,7 +203,7 @@ $variablePayload = array(
     'short_description' => '',
     'featured_image' => null,
     'images' => array(),
-    'category_names' => array(),
+    'category_path' => array(),
     'product_type' => 'variable',
     'sku' => 'hmp-600',
     'price' => null,
@@ -183,7 +254,7 @@ $partialPayload = array(
     'short_description' => '',
     'featured_image' => $brokenImageUrl,
     'images' => array(),
-    'category_names' => array(),
+    'category_path' => array(),
     'product_type' => 'simple',
     'sku' => 'hmp-700',
     'price' => '20000',
@@ -203,8 +274,12 @@ test_assert($productAfterFail->get_status() === 'draft', 'محصول Draft با�
 
 $productCountBefore = count($GLOBALS['__fake_wc_products']);
 
-// تصویر را "درست" می‌کنیم و همان محصول را Retry می‌کنیم
+// تصویر را "درست" می‌کنیم و همان محصول را Retry می‌کنیم — دقیقاً مثل دکمه
+// «تلاش مجدد» واقعی که اول دوباره queue_import() می‌زند (ردیف را به queued
+// برمی‌گرداند تا Claim اتمیک اجازه پردازش دوباره بدهد) و بعد Action آن
+// فایر می‌شود.
 $GLOBALS['__fake_media_sideload_fail_urls'] = array();
+HCI_DB::queue_import(700, 'hmp-700', (string) wp_json_encode($partialPayload));
 HCI_Import::process_import_action(700);
 
 $row6b = HCI_DB::get_map_row(700);
@@ -212,6 +287,43 @@ test_evidence('ردیف بعد از Retry موفق', $row6b);
 test_assert($row6b['import_status'] === HCI_DB::STATUS_IMPORTED, 'بعد از رفع مشکل و Retry، وضعیت imported شده');
 test_assert((int) $row6b['dest_product_id'] === $firstDestId, 'دقیقاً همان محصول قبلی (dest_product_id یکسان) تکمیل شده، نه یک محصول جدید');
 test_assert(count($GLOBALS['__fake_wc_products']) === $productCountBefore, 'هیچ محصول تکراری در (Fake) ووکامرس ساخته نشده — تعداد کل محصولات قبل/بعد از Retry یکسان است');
+
+// =============================================================================
+// تست ۷ — تنظیم جدید «دسته‌بندی‌های هی‌مد اعمال شود؟»: پیش‌فرض بله (رفتار
+// قبلی)، و وقتی خیر است هیچ Termای ساخته/اعمال نمی‌شود.
+// =============================================================================
+test_section('تست ۷ — تنظیم اعمال دسته‌بندی: پیش‌فرض بله، خاموش‌کردن یعنی هیچ Term ساخته/اعمال نمی‌شود');
+
+test_assert(HCI_Import::should_apply_categories() === true, 'پیش‌فرض (بدون هیچ تنظیمی) بله است — رفتار قبلی حفظ شده');
+
+hci_test_reset_wc_fakes();
+$wpdb7 = hci_test_create_product_map_db();
+$GLOBALS['wpdb'] = $wpdb7;
+HCI_Pricing::save(0.0, 0.0, 'publish');
+update_option('hci_apply_categories', false, false);
+
+$noCateoryPayload = array(
+    'name' => 'محصول بدون دسته اجباری',
+    'short_description' => '',
+    'featured_image' => null,
+    'images' => array(),
+    'category_path' => array(hci_cat_node(60, 'دسته‌ای که نباید ساخته شود', null)),
+    'product_type' => 'simple',
+    'sku' => 'hmp-800',
+    'price' => '1000',
+    'stock_quantity' => 1,
+    'variations' => array(),
+);
+HCI_DB::queue_import(800, 'hmp-800', (string) wp_json_encode($noCateoryPayload));
+HCI_Import::process_import_action(800);
+
+$row7 = HCI_DB::get_map_row(800);
+test_assert($row7['import_status'] === HCI_DB::STATUS_IMPORTED, 'با وجود خاموش‌بودن دسته‌بندی، بقیه Import عادی کامل می‌شود');
+test_assert(empty($GLOBALS['__fake_wc_terms']['product_cat']), 'هیچ Term دسته‌ای ساخته نشد — چون تنظیم خاموش بود، حتی با وجود category_path در Payload');
+$product7 = wc_get_product((int) $row7['dest_product_id']);
+test_assert($product7->get_category_ids() === array(), 'category_ids محصول خالی مانده — یعنی دسته پیش‌فرض ووکامرس (Uncategorized) را می‌گیرد');
+
+update_option('hci_apply_categories', true, false);
 
 echo "\n=== جمع‌بندی Import Engine ===\n";
 echo "PASS: {$GLOBALS['__test_passes']}\n";

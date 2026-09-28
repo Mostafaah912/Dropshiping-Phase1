@@ -14,9 +14,9 @@ define('ARRAY_A', 'ARRAY_A');
 define('MINUTE_IN_SECONDS', 60);
 define('HOUR_IN_SECONDS', 3600);
 define('DAY_IN_SECONDS', 86400);
-define('HMW_VERSION', '1.9.1-test');
+define('HMW_VERSION', '1.9.2-test');
 define('HMW_TIMEZONE', 'Asia/Tehran');
-define('HCI_VERSION', '0.3.0-test');
+define('HCI_VERSION', '0.4.0-test');
 
 // ---------------------------------------------------------------------------
 // توابع عمومی WordPress (حداقلی، فقط آنچه فایل‌های production واقعاً صدا می‌زنند)
@@ -183,6 +183,69 @@ function add_query_arg(...$args): string {
     $base = ($parts['scheme'] ?? '') . '://' . ($parts['host'] ?? '') . ($parts['path'] ?? '');
     $query = http_build_query($merged);
     return $query !== '' ? $base . '?' . $query : $base;
+}
+
+// --- کاربر/Capability/Nonce/Redirect (برای صفحات ادمین و AJAX) ------------
+
+$GLOBALS['__test_current_user_id'] = 1;
+$GLOBALS['__test_current_user_can'] = true;
+$GLOBALS['__test_last_redirect'] = null;
+$GLOBALS['__test_last_json_response'] = null;
+
+function get_current_user_id(): int {
+    return (int) $GLOBALS['__test_current_user_id'];
+}
+
+function current_user_can(string $capability): bool {
+    return (bool) $GLOBALS['__test_current_user_can'];
+}
+
+function wp_unslash($value) {
+    if (is_array($value)) {
+        return array_map('wp_unslash', $value);
+    }
+    return is_string($value) ? stripslashes($value) : $value;
+}
+
+function check_admin_referer($action = -1, string $query_arg = '_wpnonce'): bool {
+    return true;
+}
+
+function check_ajax_referer($action = -1, $query_arg = false, bool $die = true): bool {
+    return true;
+}
+
+function wp_create_nonce($action = -1): string {
+    return 'test-nonce-' . (string) $action;
+}
+
+function admin_url(string $path = ''): string {
+    return 'https://client-test-site.invalid/wp-admin/' . ltrim($path, '/');
+}
+
+function wp_safe_redirect(string $location, int $status = 302): bool {
+    $GLOBALS['__test_last_redirect'] = $location;
+    return true;
+}
+
+/**
+ * مثل wp_die() واقعی، wp_send_json_*() درخواست را همان‌جا متوقف می‌کند —
+ * اینجا هم با پرتاب یک استثنا شبیه‌سازی شده تا کد بعد از آن (که در Production
+ * هرگز اجرا نمی‌شود) در تست هم اجرا نشود؛ پاسخ برای بررسی در
+ * __test_last_json_response ذخیره می‌شود.
+ */
+function wp_send_json_success($data = null): void {
+    $GLOBALS['__test_last_json_response'] = array('success' => true, 'data' => $data);
+    throw new RuntimeException('wp_send_json_success');
+}
+
+function wp_send_json_error($data = null, $status_code = null): void {
+    $GLOBALS['__test_last_json_response'] = array('success' => false, 'data' => $data);
+    throw new RuntimeException('wp_send_json_error');
+}
+
+function sanitize_text_field(string $s): string {
+    return trim(strip_tags($s));
 }
 
 // --- HTTP API (فقط برای HCI_Source_Client::test_connection) ---------------
@@ -477,6 +540,8 @@ function hci_test_create_product_map_db(): Fake_WPDB {
             import_payload TEXT NULL,
             error_message TEXT NULL,
             last_synced_at TEXT NULL,
+            started_at TEXT NULL,
+            finished_at TEXT NULL,
             import_status TEXT NOT NULL DEFAULT 'pending',
             created_at TEXT NULL,
             updated_at TEXT NULL
@@ -641,7 +706,21 @@ function term_exists($term, string $taxonomy = '', $parent = null) {
 
 function wp_insert_term(string $term, string $taxonomy = '', array $args = array()) {
     $term_id = $GLOBALS['__fake_wc_next_term_id']++;
-    $GLOBALS['__fake_wc_terms'][$taxonomy][$term_id] = array('name' => $term, 'parent' => (int) ($args['parent'] ?? 0));
+    // مثل وردپرس واقعی: اگر Slug صریح داده نشده، از روی نام ساخته می‌شود؛
+    // و اگر آن Slug (صریح یا خودکار) در همین Taxonomy قبلاً گرفته شده،
+    // وردپرس با پسوند -2/-3/... آن را یکتا می‌کند.
+    $slug = trim((string) ($args['slug'] ?? ''));
+    if ($slug === '') {
+        $slug = sanitize_title($term);
+    }
+    $existing_slugs = array_column($GLOBALS['__fake_wc_terms'][$taxonomy] ?? array(), 'slug');
+    $unique_slug = $slug;
+    $suffix = 2;
+    while (in_array($unique_slug, $existing_slugs, true)) {
+        $unique_slug = $slug . '-' . $suffix;
+        $suffix++;
+    }
+    $GLOBALS['__fake_wc_terms'][$taxonomy][$term_id] = array('name' => $term, 'parent' => (int) ($args['parent'] ?? 0), 'slug' => $unique_slug);
     return array('term_id' => $term_id, 'term_taxonomy_id' => $term_id);
 }
 
@@ -655,7 +734,42 @@ function get_posts(array $args = array()) {
         }
         return $matches;
     }
+    // مثل get_posts() واقعی: meta_key بدون meta_value یعنی «هر پستی که این
+    // کلید Meta را دارد، صرف‌نظر از مقدار» — برای پیدا کردن محصولات
+    // ساخته‌شده توسط پلاگین (_hci_source_product_id) در گزینه ریست استفاده می‌شود.
+    if (!empty($args['meta_key']) && !array_key_exists('meta_value', $args)) {
+        $matches = array();
+        foreach ($GLOBALS['__fake_postmeta'] as $post_id => $meta) {
+            if (array_key_exists($args['meta_key'], $meta)) {
+                $matches[] = $post_id;
+            }
+        }
+        return $matches;
+    }
     return array();
+}
+
+/** برای تست: لیست کاربران فرضی که hci_selection_<id> برایشان ممکن است ذخیره شده باشد. */
+$GLOBALS['__test_users'] = array();
+function get_users(array $args = array()): array {
+    return $GLOBALS['__test_users'];
+}
+
+function wp_delete_post(int $post_id, bool $force_delete = false) {
+    if (isset($GLOBALS['__fake_wc_products'][$post_id])) {
+        unset($GLOBALS['__fake_wc_products'][$post_id]);
+        unset($GLOBALS['__fake_postmeta'][$post_id]);
+        return true;
+    }
+    return false;
+}
+
+function wp_delete_attachment(int $post_id, bool $force_delete = false) {
+    if (isset($GLOBALS['__fake_postmeta'][$post_id])) {
+        unset($GLOBALS['__fake_postmeta'][$post_id]);
+        return true;
+    }
+    return false;
 }
 
 /** برای تست: هر URL در این لیست، شکست دانلود را شبیه‌سازی می‌کند. */

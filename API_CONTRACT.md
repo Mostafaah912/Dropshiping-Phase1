@@ -120,8 +120,8 @@ X-HMW-API-Key: YOUR_API_KEY
   ],
   "product_url": "https://.../product/...",
   "category_path": [
-    { "id": 12, "name": "دسته اصلی", "parent_id": null },
-    { "id": 34, "name": "دسته فرعی", "parent_id": 12 }
+    { "id": 12, "name": "دسته اصلی", "slug": "daste-asli", "parent_id": null },
+    { "id": 34, "name": "دسته فرعی", "slug": "دسته-فرعی", "parent_id": 12 }
   ],
   "source_modified_gmt": "2026-09-24T11:30:00+00:00",
   "is_active": true,
@@ -141,6 +141,7 @@ X-HMW-API-Key: YOUR_API_KEY
       ],
       "price": "350000",
       "stock_quantity": 5,
+      "stock_status": "instock",
       "sku": "ABC-123-RED-M"
     },
     {
@@ -151,11 +152,14 @@ X-HMW-API-Key: YOUR_API_KEY
       ],
       "price": "360000",
       "stock_quantity": 0,
+      "stock_status": "outofstock",
       "sku": null
     }
   ]
 }
 ```
+
+`stock_status` روی هر Variation از نسخه ۱.۹.۲ به بعد اضافه شده (قبلاً فقط روی خودِ محصول والد بود، نه هر Variation) — دقیقاً برای همان دلیل `/products/delta`: وقتی `stock_quantity` یک Variation خالی/`null` است (مدیریت موجودی مبدا برای آن Variation خاموش)، کلاینت باید این فیلد را برای تشخیص موجود/ناموجود بخواند، نه فرض صفر.
 
 ### فیلدهای جدید نسبت به نسخه قبلی
 
@@ -163,7 +167,7 @@ X-HMW-API-Key: YOUR_API_KEY
 |---|---|---|
 | `short_description` | string | توضیح کوتاه محصول (HTML خام WooCommerce)، همیشه رشته (خالی اگر نبود) |
 | `gallery` | string[] | آرایه URL تصاویر گالری، **بدون** تصویر اصلی (که در `image_url` است) |
-| `category_path` | `{id, name, parent_id}[]` | **تغییر شکل**: قبلاً آرایه‌ای از رشته‌های مسیر بود؛ از این نسخه، آرایه‌ای مسطح و بدون تکرار از ریشه تا برگ، بر اساس شناسه دسته‌بندی‌های منبع. `parent_id` برای دسته‌های ریشه `null` است. |
+| `category_path` | `{id, name, slug, parent_id}[]` | **تغییر شکل**: قبلاً آرایه‌ای از رشته‌های مسیر بود؛ از این نسخه، آرایه‌ای مسطح و بدون تکرار از ریشه تا برگ، بر اساس شناسه دسته‌بندی‌های منبع. `parent_id` برای دسته‌های ریشه `null` است. **از نسخه ۱.۹.۲**: هر Node یک فیلد `slug` هم دارد — دقیقاً همان اسلاگی که در خودِ وردپرس مبدا برای آن دسته ذخیره شده (نه ساخته‌شده از روی نام سمت مبدا/مقصد). کلاینتی که هنوز نسخه قدیمی‌تر را صدا می‌زند یا کش دسته‌بندی مبدا هنوز رفرش نشده، ممکن است `slug` را خالی (`""`) دریافت کند — باید در این حالت به تولید اسلاگ از نام در مقصد برگردد (که خودِ `wp_insert_term()` وردپرس به‌صورت خودکار انجام می‌دهد) و هرگز کرش نکند. |
 | `attributes` | `{name, options}[]` | **فقط برای `product_type == "variable"`**؛ ویژگی‌های سطح محصول والد |
 | `variations` | آرایه (بخش بعد) | **فقط برای `product_type == "variable"`** |
 
@@ -215,10 +219,11 @@ Endpoint سبک برای Polling دوره‌ای: «فقط چه چیزی از ی
 
 ### منطق گروه‌بندی
 
-- اگر یک محصول ساده یا والد Variable تغییر کرده باشد → یک آیتم top-level با `sku`/`price`/`stock_quantity`/`is_active` خودش.
-- اگر یکی از Variationهای یک محصول Variable تغییر کرده باشد (حتی اگر خودِ والد تغییر نکرده) → یک آیتم top-level برای والد ساخته می‌شود (با خوانده‌شدن `sku`/`price`/`stock_quantity`/`is_active` فعلی والد از دیتابیس، نه لزوماً «تغییریافته») و آن Variation داخل کلید `variations` همان آیتم قرار می‌گیرد.
+- اگر یک محصول ساده یا والد Variable تغییر کرده باشد → یک آیتم top-level با `sku`/`price`/`stock_quantity`/`stock_status`/`is_active` خودش.
+- اگر یکی از Variationهای یک محصول Variable تغییر کرده باشد (حتی اگر خودِ والد تغییر نکرده) → یک آیتم top-level برای والد ساخته می‌شود (با خوانده‌شدن `sku`/`price`/`stock_quantity`/`stock_status`/`is_active` فعلی والد از دیتابیس، نه لزوماً «تغییریافته») و آن Variation داخل کلید `variations` همان آیتم قرار می‌گیرد.
 - **فقط Variationهایی که واقعاً تغییر کرده‌اند** در `variations` می‌آیند — نه همه‌ی Variationهای آن والد.
 - **توصیه به کلاینت‌ها**: وقتی `is_active === false` روی یک آیتم (یا عضو `variations`) دیدید، فقط وضعیت موجودی مقصد را `outofstock` کنید؛ محصول را حذف یا Draft نکنید و قیمت/نام/تصویر/دسته‌بندی‌اش را تغییر ندهید — این دقیقاً همان سیگنالی است که برای تشخیص «منبع این محصول را کنار گذاشته» لازم دارید.
+- **از نسخه ۱.۹.۲ به بعد، `stock_status` هم روی هر آیتم (چه top-level چه هر عضو `variations`) هست** — دقیقاً برای حالتی که مدیریت موجودی در مبدا خاموش است (`stock_quantity === null`): در این حالت هیچ عدد دقیقی برای موجودی وجود ندارد، پس تنها راه کلاینت برای تشخیص «موجود» از «ناموجود» همین `stock_status` خام مبدا است. کلاینت هرگز نباید `stock_quantity === null` را معادل صفر/ناموجود فرض کند.
 
 ### نمونه پاسخ
 
@@ -226,18 +231,20 @@ Endpoint سبک برای Polling دوره‌ای: «فقط چه چیزی از ی
 {
   "success": true,
   "data": [
-    { "source_product_id": 1200, "sku": "XYZ-1", "price": "410000", "stock_quantity": 3, "is_active": true },
+    { "source_product_id": 1200, "sku": "XYZ-1", "price": "410000", "stock_quantity": 3, "stock_status": "instock", "is_active": true },
+    { "source_product_id": 1201, "sku": "XYZ-2", "price": "90000", "stock_quantity": null, "stock_status": "instock", "is_active": true },
     {
       "source_product_id": 1234,
       "sku": "ABC-123",
       "price": "350000",
       "stock_quantity": 12,
+      "stock_status": "instock",
       "is_active": true,
       "variations": [
-        { "variation_id": 1236, "sku": null, "price": "365000", "stock_quantity": 0, "is_active": true }
+        { "variation_id": 1236, "sku": null, "price": "365000", "stock_quantity": 0, "stock_status": "outofstock", "is_active": true }
       ]
     },
-    { "source_product_id": 1500, "sku": "OLD-9", "price": "120000", "stock_quantity": 0, "is_active": false }
+    { "source_product_id": 1500, "sku": "OLD-9", "price": "120000", "stock_quantity": 0, "stock_status": "outofstock", "is_active": false }
   ],
   "pagination": { "page": 1, "per_page": 100, "total": 57, "total_pages": 1, "has_next": false, "has_previous": false },
   "filters": { "updated_after": "2026-09-26 00:00:00" },
@@ -268,6 +275,7 @@ Endpoint سبک برای Polling دوره‌ای: «فقط چه چیزی از ی
    - **محدودیت اجرای همزمان (Execution Time)**: چون این واکشی به‌صورت همزمان (Synchronous) داخل همان درخواست admin-post انجام می‌شود (نه Tick‌های ناهمزمان مثل Full Sync در `heymode-wholesale`)، برای کاتالوگ‌های خیلی بزرگ (چند هزار صفحه) ممکن است به `max_execution_time` هاست برخورد کند؛ در آن صورت مکانیزم Resume از همان صفحه، عملاً جایگزین یک Tick دستی می‌شود (چند بار کلیک «بروزرسانی از منبع» تا کامل شود).
 3. **`/products/delta` و صفحه‌بندی**: طبق توضیح بخش ۶، در حجم‌های خیلی بالا و `per_page` کوچک، یک والد Variable ممکن است در پاسخ دو صفحه‌ی متفاوت (یک‌بار بدون variations، یک‌بار با variations) ظاهر شود.
 4. این تغییرات نیازمند migration خودکار دیتابیس (ستون‌های جدید در جدول محصولات) هستند که با ارتقای نسخه پلاگین به 1.9.0 و اجرای `dbDelta` در `plugins_loaded` به‌صورت خودکار انجام می‌شود؛ برای اعمال فوری کافی است پلاگین را از حالت غیرفعال/فعال دوباره عبور دهید یا صرفاً یک بار صفحه‌ی ادمین را باز کنید (چون `ensure_schema()` در `plugins_loaded` هم صدا زده می‌شود).
+5. **نقشه دسته‌بندی (`hmw_source_category_map`) و `slug`**: این نقشه (id→نام/اسلاگ/parent هر دسته مبدا) یک `wp_option` دائمی است، نه Transient با انقضا — یک‌بار ساخته می‌شود و فقط با فراخوانی صریح رفرش می‌شود. روی یک نصب از قبل فعال که به ۱.۹.۲ ارتقا پیدا کرده، دسته‌هایی که از قبل در این Option کش شده بودند `slug` نخواهند داشت تا وقتی این Option صریحاً رفرش شود (مثلاً `wp option delete hmw_source_category_map` یا غیرفعال/فعال‌کردن پلاگین heymode-wholesale — نه یک «Full Sync» محصولات؛ خودِ محصولات نیازی به Sync دوباره ندارند چون `slug` در لحظه‌ی ساخت پاسخ REST از همین نقشه خوانده می‌شود، نه از دیتابیس محصولات).
 
 ---
 

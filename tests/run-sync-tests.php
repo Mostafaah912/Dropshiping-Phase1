@@ -206,6 +206,9 @@ $wpdb4 = hci_sync_reset();
 $parentProduct = new WC_Product_Variable();
 $parentProduct->set_status('publish');
 $parentProduct->set_name('محصول Variable');
+// محصولات Variable معمولاً manage_stock خودشان خاموش است و stock_status
+// والد صرفاً «موجود» گزارش می‌شود (موجودی واقعی روی خودِ Variationهاست).
+$parentProduct->set_stock_status('instock');
 $parentDestId = $parentProduct->save();
 
 $var1 = new WC_Product_Variation();
@@ -264,10 +267,11 @@ $GLOBALS['__stub_http_response_queue'] = array(
             'sku' => 'hmp-600',
             'price' => null,
             'stock_quantity' => null,
+            'stock_status' => 'instock',
             'is_active' => true,
             'variations' => array(
-                array('variation_id' => 601, 'sku' => 'hmp-601', 'price' => '50000', 'stock_quantity' => 3.0, 'is_active' => true),
-                array('variation_id' => 602, 'sku' => null, 'price' => '60000', 'stock_quantity' => 0.0, 'is_active' => true),
+                array('variation_id' => 601, 'sku' => 'hmp-601', 'price' => '50000', 'stock_quantity' => 3.0, 'stock_status' => 'instock', 'is_active' => true),
+                array('variation_id' => 602, 'sku' => null, 'price' => '60000', 'stock_quantity' => 0.0, 'stock_status' => 'outofstock', 'is_active' => true),
             ),
         ),
     )),

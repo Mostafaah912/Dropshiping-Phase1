@@ -207,6 +207,15 @@ final class HCI_Sync {
         ), true);
     }
 
+    /**
+     * برای دکمه «ریست داده‌ها»: شمارنده Retry را پاک می‌کند تا اگر Action
+     * Scheduler هم مستقلاً پاک شده، یک زنجیره Backoff نیمه‌کاره باقی نماند
+     * (اجرای بعدی از تلاش اول/۵ دقیقه شروع می‌شود، نه از جایی که رها شده بود).
+     */
+    public static function reset_retry_state(): void {
+        delete_option(self::RETRY_COUNT_OPTION);
+    }
+
     private static function finish(array $summary, bool $success): array {
         update_option(self::RETRY_COUNT_OPTION, $success ? 0 : (int) get_option(self::RETRY_COUNT_OPTION, 0), false);
         update_option(self::SUMMARY_OPTION, $summary, false);

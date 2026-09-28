@@ -313,4 +313,15 @@ final class HCI_DB {
         }
         return $grouped;
     }
+
+    /**
+     * برای دکمه «ریست داده‌ها»: کل جدول ردیابی را خالی می‌کند (نه DROP، خودِ
+     * ساختار جدول دست‌نخورده می‌ماند). DELETE به‌جای TRUNCATE استفاده شده چون
+     * هم روی MySQL واقعی هم روی SQLite تست‌ها یکسان کار می‌کند.
+     */
+    public static function truncate_product_map(): int {
+        global $wpdb;
+        $result = $wpdb->query('DELETE FROM ' . self::product_map_table());
+        return $result === false ? 0 : (int) $result;
+    }
 }

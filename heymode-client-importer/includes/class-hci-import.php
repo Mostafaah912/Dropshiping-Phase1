@@ -5,6 +5,7 @@ defined('ABSPATH') || exit;
 final class HCI_Import {
     private const CAPABILITY = 'manage_woocommerce';
     public const ACTION_HOOK = 'hci_import_product';
+    public const GROUP = 'hci-import';
     private const SKU_SOURCE_PREFIX = 'hmp';
     private const SKU_DEST_PREFIX = 'vsp';
     private const IMAGE_URL_META_KEY = '_hci_source_image_url';
@@ -105,7 +106,7 @@ final class HCI_Import {
         if (!function_exists('as_schedule_single_action')) {
             return array('success' => false, 'message' => 'Action Scheduler در دسترس نیست — مطمئن شوید ووکامرس فعال است.');
         }
-        as_schedule_single_action(time(), self::ACTION_HOOK, array('source_product_id' => $source_product_id), 'hci-import');
+        as_schedule_single_action(time(), self::ACTION_HOOK, array('source_product_id' => $source_product_id), self::GROUP);
 
         return array('success' => true, 'message' => 'صف‌بندی شد.');
     }

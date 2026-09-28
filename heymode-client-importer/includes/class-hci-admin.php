@@ -55,6 +55,7 @@ final class HCI_Admin {
         add_action('admin_post_hci_save_connection', array(__CLASS__, 'handle_save_connection'));
         add_action('admin_post_hci_test_connection', array(__CLASS__, 'handle_test_connection'));
         add_action('admin_post_hci_save_pricing', array(__CLASS__, 'handle_save_pricing'));
+        add_action('admin_post_hci_reset_data', array(__CLASS__, 'handle_reset_data'));
     }
 
     public static function admin_menu(): void {
@@ -75,7 +76,7 @@ final class HCI_Admin {
         }
 
         $tab = isset($_GET['tab']) ? sanitize_key(wp_unslash($_GET['tab'])) : 'connection';
-        if (!in_array($tab, array('connection', 'pricing'), true)) {
+        if (!in_array($tab, array('connection', 'pricing', 'reset'), true)) {
             $tab = 'connection';
         }
 
@@ -93,15 +94,26 @@ final class HCI_Admin {
                 <div class="notice notice-error is-dismissible"><p>تست اتصال ناموفق بود. جزئیات: <?php echo esc_html((string) get_transient('hci_last_test_message')); ?></p></div>
             <?php elseif ($notice === 'pricing_saved') : ?>
                 <div class="notice notice-success is-dismissible"><p>تنظیمات قیمت‌گذاری ذخیره شد.</p></div>
+            <?php elseif ($notice === 'data_reset') : ?>
+                <div class="notice notice-success is-dismissible"><p>داده‌ها ریست شدند: جدول ردیابی، صف‌های Action Scheduler و کش محصولات کاملاً پاک شدند.</p></div>
             <?php endif; ?>
 
             <h2 class="nav-tab-wrapper">
                 <a href="<?php echo esc_url(add_query_arg('tab', 'connection', $base_url)); ?>" class="nav-tab <?php echo $tab === 'connection' ? 'nav-tab-active' : ''; ?>">اتصال</a>
                 <a href="<?php echo esc_url(add_query_arg('tab', 'pricing', $base_url)); ?>" class="nav-tab <?php echo $tab === 'pricing' ? 'nav-tab-active' : ''; ?>">قیمت‌گذاری</a>
+                <a href="<?php echo esc_url(add_query_arg('tab', 'reset', $base_url)); ?>" class="nav-tab <?php echo $tab === 'reset' ? 'nav-tab-active' : ''; ?>">ریست داده‌ها</a>
             </h2>
 
             <div style="max-width:900px;margin-top:20px">
-                <?php $tab === 'pricing' ? self::render_pricing_tab() : self::render_connection_tab(); ?>
+                <?php
+                if ($tab === 'pricing') {
+                    self::render_pricing_tab();
+                } elseif ($tab === 'reset') {
+                    self::render_reset_tab();
+                } else {
+                    self::render_connection_tab();
+                }
+                ?>
             </div>
         </div>
         <?php
@@ -217,6 +229,55 @@ final class HCI_Admin {
         })();
         </script>
         <?php
+    }
+
+    private static function render_reset_tab(): void {
+        ?>
+        <h2>ریست داده‌ها</h2>
+        <p>این عملیات موارد زیر را کاملاً پاک می‌کند:</p>
+        <ul style="list-style:disc;padding-right:20px">
+            <li>جدول ردیابی Import (<code>wp_hci_product_map</code>) — همه رکوردهای Imported/Duplicate/Partial/Error/در صف.</li>
+            <li>صف‌های Action Scheduler این پلاگین — هم Importهای در حال انتظار، هم زمان‌بندی سینک روزانه (که بلافاصله دوباره خودکار زمان‌بندی می‌شود).</li>
+            <li>کش محصولات منبع (صفحه محصولات، شامل هر حالت نیمه‌کاره ناشی از Rate Limit).</li>
+        </ul>
+        <p><strong>توجه:</strong> این کار هیچ محصولی را از ووکامرس حذف نمی‌کند و روی محصولات از قبل Import‌شده در سایت اثری ندارد — فقط ردیابی/صف/کش این پلاگین پاک می‌شود؛ یعنی بعد از ریست، محصولات قبلاً Import‌شده دیگر به‌عنوان «قبلاً Import‌شده» شناخته نمی‌شوند و سینک روزانه دیگر آن‌ها را به‌روز نمی‌کند تا دوباره از صفحه محصولات Import شوند. تنظیمات اتصال/قیمت‌گذاری و Cursor سینک دست‌نخورده می‌مانند.</p>
+        <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>"
+            onsubmit="return confirm('مطمئنید؟ این کار جدول ردیابی، صف‌های Import/سینک، و کش محصولات را کاملاً پاک می‌کند و برگشت‌پذیر نیست.');">
+            <input type="hidden" name="action" value="hci_reset_data">
+            <?php wp_nonce_field('hci_reset_data'); ?>
+            <button type="submit" class="button button-secondary" style="color:#a00;border-color:#a00">ریست داده‌ها</button>
+        </form>
+        <?php
+    }
+
+    /**
+     * منطق واقعی ریست — جدا از handle_reset_data() (که Nonce/Capability را
+     * چک و در پایان Redirect+exit می‌کند) تا مستقل و بدون HTTP قابل تست باشد.
+     */
+    public static function reset_data(): array {
+        $rows_cleared = HCI_DB::truncate_product_map();
+
+        if (function_exists('as_unschedule_all_actions')) {
+            // فقط با Hook (بدون args/group) صدا زده می‌شود تا همه نمونه‌های
+            // زمان‌بندی‌شده آن Hook — صرف‌نظر از آرگومان‌هایشان — پاک شوند؛
+            // چون هر دو Hook کاملاً مختص این پلاگین‌اند، اثری روی Action
+            // Scheduler سایر پلاگین‌ها/ووکامرس ندارد. زمان‌بندی روزانه سینک
+            // بلافاصله در اجرای بعدی init() دوباره خودش را می‌سازد.
+            as_unschedule_all_actions(HCI_Import::ACTION_HOOK);
+            as_unschedule_all_actions(HCI_Sync::DAILY_HOOK);
+        }
+        HCI_Sync::reset_retry_state();
+
+        HCI_Source_Client::clear_all_cache();
+
+        return array('rows_cleared' => $rows_cleared);
+    }
+
+    public static function handle_reset_data(): void {
+        self::guard('hci_reset_data');
+        self::reset_data();
+        wp_safe_redirect(add_query_arg(array('page' => 'heymode-client-importer', 'tab' => 'reset', 'hci_notice' => 'data_reset'), admin_url('admin.php')));
+        exit;
     }
 
     public static function handle_save_connection(): void {

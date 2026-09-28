@@ -727,6 +727,27 @@ function as_next_scheduled_action(string $hook, $args = null, string $group = ''
     return false;
 }
 
+/**
+ * کد Production همیشه این تابع را فقط با $hook (بدون args/group) صدا می‌زند
+ * تا مسیر واقعی Bulk-Cancel-By-Hook خودِ Action Scheduler را بگیرد (همه
+ * نمونه‌های آن Hook را صرف‌نظر از آرگومان پاک می‌کند) — همین رفتار اینجا هم
+ * شبیه‌سازی شده؛ فراخوانی با args/group مشخص در این Stub ساده پشتیبانی نشده
+ * چون هیچ‌جای Production این‌طور صدایش نمی‌زند.
+ */
+function as_unschedule_all_actions(string $hook, array $args = array(), string $group = ''): void {
+    if (!empty($args) || !empty($group)) {
+        return;
+    }
+    $GLOBALS['__fake_as_single_actions'] = array_values(array_filter(
+        $GLOBALS['__fake_as_single_actions'],
+        static fn (array $a): bool => $a['hook'] !== $hook
+    ));
+    $GLOBALS['__fake_as_recurring_actions'] = array_values(array_filter(
+        $GLOBALS['__fake_as_recurring_actions'],
+        static fn (array $a): bool => $a['hook'] !== $hook
+    ));
+}
+
 // ---------------------------------------------------------------------------
 // بارگذاری فایل‌های واقعی production (بدون تغییر منطق)
 // ---------------------------------------------------------------------------
@@ -743,6 +764,7 @@ require_once HCI_REPO_ROOT . '/includes/class-hci-pricing.php';
 require_once HCI_REPO_ROOT . '/includes/class-hci-products.php';
 require_once HCI_REPO_ROOT . '/includes/class-hci-import.php';
 require_once HCI_REPO_ROOT . '/includes/class-hci-sync.php';
+require_once HCI_REPO_ROOT . '/includes/class-hci-admin.php';
 
 // ---------------------------------------------------------------------------
 // Assertion helpers ساده

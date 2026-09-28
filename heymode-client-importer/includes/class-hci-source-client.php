@@ -128,6 +128,17 @@ final class HCI_Source_Client {
     }
 
     /**
+     * برای دکمه «ریست داده‌ها»: برخلاف clear_products_cache() (که فقط قبل از
+     * یک Fetch تازه صدا زده می‌شود و عمداً حالت جزئی/Rate-Limit را دست‌نخورده
+     * می‌گذارد تا واکشی بعدی Resume شود)، اینجا صراحتاً هر دو Transient پاک
+     * می‌شوند — چون این یک ریست کامل و آگاهانه است، نه ادامه یک واکشی قبلی.
+     */
+    public static function clear_all_cache(): void {
+        delete_transient(self::PRODUCTS_CACHE_TRANSIENT);
+        delete_transient(self::PARTIAL_STATE_TRANSIENT);
+    }
+
+    /**
      * فقط تغییرات (price/stock/is_active) از یک نقطه‌ی زمانی به بعد — برای
      * سینک روزانه. برخلاف get_all_products() هیچ‌چیز Cache نمی‌شود (هر بار
      * Cursor فرق می‌کند) و پیشرفت جزئی بین صفحات هم persist نمی‌شود چون

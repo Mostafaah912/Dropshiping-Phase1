@@ -606,13 +606,18 @@ final class HMW_REST_API {
         $per_page = min(200, max(1, (int) $request->get_param('per_page')));
         $offset = ($page - 1) * $per_page;
 
+        // is_active=1 عمداً اینجا فیلتر نمی‌شود: is_active خودش یکی از
+        // compare_fields است، پس لحظه‌ای که محصولی در منبع غیرفعال/حذف
+        // می‌شود دقیقاً همان لحظه‌ای است که باید در delta ظاهر شود (تا
+        // کلاینت بتواند آن را outofstock کند) — فیلتر قبلی این رکوردها را
+        // درست همان لحظه‌ای که مهم بودند، حذف می‌کرد.
         $total = (int) $wpdb->get_var($wpdb->prepare(
-            "SELECT COUNT(*) FROM {$table} WHERE updated_at > %s AND is_active = 1",
+            "SELECT COUNT(*) FROM {$table} WHERE updated_at > %s",
             $updated_after
         ));
 
         $changed = $wpdb->get_results($wpdb->prepare(
-            "SELECT source_product_id, parent_product_id, sku, price, stock_quantity FROM {$table} WHERE updated_at > %s AND is_active = 1 ORDER BY source_product_id ASC LIMIT %d OFFSET %d",
+            "SELECT source_product_id, parent_product_id, sku, price, stock_quantity, is_active FROM {$table} WHERE updated_at > %s ORDER BY source_product_id ASC LIMIT %d OFFSET %d",
             $updated_after,
             $per_page,
             $offset
@@ -647,6 +652,7 @@ final class HMW_REST_API {
                     'sku' => null,
                     'price' => null,
                     'stock_quantity' => null,
+                    'is_active' => null,
                     'variations' => array(),
                 );
             }
@@ -655,6 +661,7 @@ final class HMW_REST_API {
                 'sku' => $row['sku'] !== null ? (string) $row['sku'] : null,
                 'price' => $row['price'] !== null ? (string) $row['price'] : null,
                 'stock_quantity' => $row['stock_quantity'] !== null ? (float) $row['stock_quantity'] : null,
+                'is_active' => (bool) $row['is_active'],
             );
             if (empty($base_filled[$parent_id])) {
                 $needed_parent_ids[] = $parent_id;
@@ -665,7 +672,7 @@ final class HMW_REST_API {
         if ($needed_parent_ids) {
             $placeholders = implode(',', array_fill(0, count($needed_parent_ids), '%d'));
             $parent_rows = $wpdb->get_results($wpdb->prepare(
-                "SELECT source_product_id, sku, price, stock_quantity FROM {$table} WHERE source_product_id IN ({$placeholders})",
+                "SELECT source_product_id, sku, price, stock_quantity, is_active FROM {$table} WHERE source_product_id IN ({$placeholders})",
                 $needed_parent_ids
             ), ARRAY_A);
             foreach ((array) $parent_rows as $prow) {
@@ -676,6 +683,7 @@ final class HMW_REST_API {
                 $items_by_id[$pid]['sku'] = $prow['sku'] !== null ? (string) $prow['sku'] : null;
                 $items_by_id[$pid]['price'] = $prow['price'] !== null ? (string) $prow['price'] : null;
                 $items_by_id[$pid]['stock_quantity'] = $prow['stock_quantity'] !== null ? (float) $prow['stock_quantity'] : null;
+                $items_by_id[$pid]['is_active'] = (bool) $prow['is_active'];
             }
         }
 
@@ -710,6 +718,7 @@ final class HMW_REST_API {
             'sku' => $row['sku'] !== null ? (string) $row['sku'] : null,
             'price' => $row['price'] !== null ? (string) $row['price'] : null,
             'stock_quantity' => $row['stock_quantity'] !== null ? (float) $row['stock_quantity'] : null,
+            'is_active' => (bool) $row['is_active'],
         );
     }
 }

@@ -109,7 +109,7 @@ test_assert(count($categories) === 3 && isset($categories[1], $categories[2], $c
 // =============================================================================
 // تشخیص Duplicate — HCI_DB
 // =============================================================================
-test_section('تشخیص Duplicate — HCI_DB::get_imported_source_ids() / get_imported_source_skus() / insert_pending()');
+test_section('تشخیص Duplicate — HCI_DB::get_imported_source_ids() / get_imported_source_skus() / queue_import()');
 
 $mapWpdb = hci_test_create_product_map_db();
 $GLOBALS['wpdb'] = $mapWpdb;
@@ -130,13 +130,13 @@ test_evidence('get_imported_source_skus()', $importedSkusReal);
 test_assert($importedIdsReal === array(20), 'get_imported_source_ids() دقیقاً همان ۱ رکورد ثبت‌شده را برمی‌گرداند');
 test_assert($importedSkusReal === array('BAG-20'), 'get_imported_source_skus() SKU همان رکورد را برمی‌گرداند');
 
-$insertResult = HCI_DB::insert_pending(30, 'SHIRT-30');
-test_evidence('insert_pending(30, "SHIRT-30")', $insertResult);
-test_assert($insertResult['success'] === true, 'insert_pending() برای محصول جدید موفق است');
+$queueResult = HCI_DB::queue_import(30, 'SHIRT-30', '{"name":"پیراهن"}');
+test_evidence('queue_import(30, "SHIRT-30", ...)', $queueResult);
+test_assert($queueResult['success'] === true, 'queue_import() برای محصول جدید موفق است');
 
 $importedIdsAfter = HCI_DB::get_imported_source_ids();
 sort($importedIdsAfter);
-test_assert($importedIdsAfter === array(20, 30), 'بعد از insert_pending، محصول ۳۰ هم در فهرست Imported هست');
+test_assert($importedIdsAfter === array(20, 30), 'بعد از queue_import، محصول ۳۰ هم در فهرست Imported هست');
 
 // شبیه‌سازی دقیق منطق ajax_mark_pending(): تلاش دوباره برای محصول تکراری باید رد شود
 $alreadyImported = in_array(20, HCI_DB::get_imported_source_ids(), true);

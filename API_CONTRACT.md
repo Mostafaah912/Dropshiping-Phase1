@@ -211,13 +211,14 @@ Endpoint سبک برای Polling دوره‌ای: «فقط چه چیزی از ی
 | `page` | int | خیر (پیش‌فرض 1) | |
 | `per_page` | int | خیر (پیش‌فرض 100، حداکثر 200) | |
 
-فقط رکوردهای **فعال** (`is_active = 1`) در نظر گرفته می‌شوند.
+**برخلاف نسخه‌ی قبلی این بخش، `is_active = 1` دیگر فیلتر نمی‌شود** — از نسخه ۱.۹.۱ به بعد، رکوردهایی که به‌تازگی در منبع غیرفعال/حذف/Draft شده‌اند هم اگر `updated_at` آن‌ها بعد از `updated_after` باشد در نتیجه می‌آیند (چون `is_active` خودش یکی از فیلدهای مقایسه‌شده است که `updated_at` را جلو می‌برد — فیلتر قبلی دقیقاً همان رکوردهایی را که این لحظه برای کلاینت مهم بودند حذف می‌کرد). هر آیتم (چه top-level، چه هر عضو `variations`) حالا یک فیلد `is_active` هم دارد تا کلاینت بتواند این حالت را از یک تغییر عادی قیمت/موجودی تشخیص دهد.
 
 ### منطق گروه‌بندی
 
-- اگر یک محصول ساده یا والد Variable تغییر کرده باشد → یک آیتم top-level با `sku`/`price`/`stock_quantity` خودش.
-- اگر یکی از Variationهای یک محصول Variable تغییر کرده باشد (حتی اگر خودِ والد تغییر نکرده) → یک آیتم top-level برای والد ساخته می‌شود (با خوانده‌شدن `sku`/`price`/`stock_quantity` فعلی والد از دیتابیس، نه لزوماً «تغییریافته») و آن Variation داخل کلید `variations` همان آیتم قرار می‌گیرد.
+- اگر یک محصول ساده یا والد Variable تغییر کرده باشد → یک آیتم top-level با `sku`/`price`/`stock_quantity`/`is_active` خودش.
+- اگر یکی از Variationهای یک محصول Variable تغییر کرده باشد (حتی اگر خودِ والد تغییر نکرده) → یک آیتم top-level برای والد ساخته می‌شود (با خوانده‌شدن `sku`/`price`/`stock_quantity`/`is_active` فعلی والد از دیتابیس، نه لزوماً «تغییریافته») و آن Variation داخل کلید `variations` همان آیتم قرار می‌گیرد.
 - **فقط Variationهایی که واقعاً تغییر کرده‌اند** در `variations` می‌آیند — نه همه‌ی Variationهای آن والد.
+- **توصیه به کلاینت‌ها**: وقتی `is_active === false` روی یک آیتم (یا عضو `variations`) دیدید، فقط وضعیت موجودی مقصد را `outofstock` کنید؛ محصول را حذف یا Draft نکنید و قیمت/نام/تصویر/دسته‌بندی‌اش را تغییر ندهید — این دقیقاً همان سیگنالی است که برای تشخیص «منبع این محصول را کنار گذاشته» لازم دارید.
 
 ### نمونه پاسخ
 
@@ -225,16 +226,18 @@ Endpoint سبک برای Polling دوره‌ای: «فقط چه چیزی از ی
 {
   "success": true,
   "data": [
-    { "source_product_id": 1200, "sku": "XYZ-1", "price": "410000", "stock_quantity": 3 },
+    { "source_product_id": 1200, "sku": "XYZ-1", "price": "410000", "stock_quantity": 3, "is_active": true },
     {
       "source_product_id": 1234,
       "sku": "ABC-123",
       "price": "350000",
       "stock_quantity": 12,
+      "is_active": true,
       "variations": [
-        { "variation_id": 1236, "sku": null, "price": "365000", "stock_quantity": 0 }
+        { "variation_id": 1236, "sku": null, "price": "365000", "stock_quantity": 0, "is_active": true }
       ]
-    }
+    },
+    { "source_product_id": 1500, "sku": "OLD-9", "price": "120000", "stock_quantity": 0, "is_active": false }
   ],
   "pagination": { "page": 1, "per_page": 100, "total": 57, "total_pages": 1, "has_next": false, "has_previous": false },
   "filters": { "updated_after": "2026-09-26 00:00:00" },

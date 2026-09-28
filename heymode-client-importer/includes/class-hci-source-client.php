@@ -127,35 +127,93 @@ final class HCI_Source_Client {
         delete_transient(self::PRODUCTS_CACHE_TRANSIENT);
     }
 
+    /**
+     * فقط تغییرات (price/stock/is_active) از یک نقطه‌ی زمانی به بعد — برای
+     * سینک روزانه. برخلاف get_all_products() هیچ‌چیز Cache نمی‌شود (هر بار
+     * Cursor فرق می‌کند) و پیشرفت جزئی بین صفحات هم persist نمی‌شود چون
+     * تصمیم Retry (۰۶:۰۰ → ۰۶:۰۵ → ۰۶:۱۵) یک لایه بالاتر (HCI_Sync) گرفته
+        * می‌شود: با شکست، کل Delta با همان Cursor دوباره از صفحه ۱ خوانده می‌شود
+     * (چون Cursor جلو نرفته، این عملیات Idempotent است).
+     */
+    public static function get_delta_products(string $updated_after): array {
+        $api_url = trim((string) get_option('hci_api_url', ''));
+        $api_key = trim((string) get_option('hci_api_key', ''));
+        if ($api_url === '' || $api_key === '') {
+            return array('success' => false, 'items' => array(), 'message' => 'API URL و API Key باید هر دو تنظیم شوند.');
+        }
+
+        $items = array();
+        $page = 1;
+        $total_pages = 1;
+
+        while ($page <= $total_pages && $page <= self::MAX_PAGES) {
+            $url = add_query_arg(array(
+                'updated_after' => $updated_after,
+                'page' => $page,
+                'per_page' => 200,
+            ), rtrim($api_url, '/') . '/products/delta');
+
+            $result = self::request_json_with_retry($url, $api_key, 20);
+            if (!$result['success']) {
+                return array(
+                    'success' => false,
+                    'items' => $items,
+                    'rate_limited' => !empty($result['rate_limited']),
+                    'message' => $result['message'],
+                );
+            }
+
+            $page_items = is_array($result['data']) ? $result['data'] : array();
+            $items = array_merge($items, $page_items);
+            $total_pages = (int) ($result['pagination']['total_pages'] ?? $page);
+            $page++;
+
+            if (empty($page_items)) {
+                break;
+            }
+            if ($page <= $total_pages && $page <= self::MAX_PAGES) {
+                usleep(self::$page_delay_us);
+            }
+        }
+
+        return array('success' => true, 'items' => $items);
+    }
+
     private static function fetch_products_page_with_retry(string $api_url, string $api_key, int $page): array {
-        $result = self::fetch_products_page($api_url, $api_key, $page);
+        $url = add_query_arg(array(
+            'page' => $page,
+            'per_page' => 100,
+            'include_inactive' => 'false',
+        ), rtrim($api_url, '/') . '/products');
+        return self::request_json_with_retry($url, $api_key, 15);
+    }
+
+    /**
+     * add_query_arg() به‌جای ساخت دستی '?'+http_build_query لازم است: وقتی
+     * Permalinks سایت منبع روی Plain باشد، rest_url() آدرسی مثل
+     * '.../index.php?rest_route=/hmw/v1' برمی‌گرداند که خودش از قبل یک '?'
+     * دارد؛ اضافه‌کردن یک '?' دیگر باعث می‌شد کوئری‌استرینگ به‌اشتباه پارس
+     * شود (rest_route با '?page=1' آلوده می‌شد و هیچ Route‌ای مچ نمی‌کرد).
+     * add_query_arg() هر دو فرمت (Pretty Permalinks و ?rest_route=) را درست
+     * merge می‌کند — همه‌ی Endpointهای این کلاینت باید از همین مسیر بگذرند.
+     */
+    private static function request_json_with_retry(string $url, string $api_key, int $timeout): array {
+        $result = self::request_json($url, $api_key, $timeout);
         if (($result['status'] ?? null) !== 429) {
             return $result;
         }
 
         sleep(self::$rate_limit_retry_delay_s);
-        $retry = self::fetch_products_page($api_url, $api_key, $page);
+        $retry = self::request_json($url, $api_key, $timeout);
         if (($retry['status'] ?? null) === 429) {
             $retry['rate_limited'] = true;
         }
         return $retry;
     }
 
-    private static function fetch_products_page(string $api_url, string $api_key, int $page): array {
-        // add_query_arg() به‌جای ساخت دستی '?'+http_build_query لازم است: وقتی
-        // Permalinks سایت منبع روی Plain باشد، rest_url() آدرسی مثل
-        // '.../index.php?rest_route=/hmw/v1' برمی‌گرداند که خودش از قبل یک '?'
-        // دارد؛ اضافه‌کردن یک '?' دیگر بعد از '/products' باعث می‌شد کوئری‌استرینگ
-        // به‌اشتباه پارس شود (rest_route با '?page=1' آلوده می‌شد و هیچ Route‌ای
-        // مچ نمی‌کرد). add_query_arg() هر دو فرمت (Pretty Permalinks و
-        // ?rest_route=) را درست merge می‌کند.
-        $url = add_query_arg(array(
-            'page' => $page,
-            'per_page' => 100,
-            'include_inactive' => 'false',
-        ), rtrim($api_url, '/') . '/products');
+    private static function request_json(string $url, string $api_key, int $timeout): array {
         $response = wp_remote_get($url, array(
-            'timeout' => 15,
+            'timeout' => $timeout,
             'headers' => array(
                 'Authorization' => 'Bearer ' . $api_key,
                 'Accept' => 'application/json',

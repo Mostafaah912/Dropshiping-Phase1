@@ -374,8 +374,10 @@ final class HCI_Products {
             'id' => $id,
             'name' => (string) ($item['name'] ?? ''),
             'short_description' => (string) ($item['short_description'] ?? ''),
+            'sku' => $item['sku'] ?? null,
             'price' => $item['price'],
             'stock_status' => (string) ($item['stock_status'] ?? ''),
+            'stock_quantity' => $item['stock_quantity'] ?? null,
             'category_names' => $category_names,
             'image_url' => $item['image_url'],
             'gallery' => (array) ($item['gallery'] ?? array()),
@@ -413,7 +415,9 @@ final class HCI_Products {
                     source_product_id: product.id,
                     name: product.name,
                     short_description: product.short_description,
+                    sku: product.sku,
                     price: product.price,
+                    stock_quantity: product.stock_quantity,
                     category_names: product.category_names,
                     featured_image: product.image_url,
                     images: (product.gallery || []).slice(),
@@ -687,45 +691,64 @@ final class HCI_Products {
             return;
         }
 
-        $imported_ids = array_flip(HCI_DB::get_imported_source_ids());
-        $imported_skus = array_flip(HCI_DB::get_imported_source_skus());
+        // وضعیت واقعی هر ردیف از جدول ردیابی (نه صرفاً «آیا رکوردی وجود
+        // دارد») — چون حالا یک ردیف می‌تواند queued/processing/error/partial
+        // هم باشد، نه فقط imported.
+        $statuses = HCI_DB::get_import_statuses(array_keys($selection));
 
         ?>
+        <p>
+            <button type="button" class="button button-primary" id="hci-import-batch">Import همه (ردیف‌های معتبر)</button>
+            <strong id="hci-import-counter" style="margin-right:10px"></strong>
+        </p>
         <table class="widefat striped" style="max-width:1200px">
             <thead>
                 <tr>
-                    <th>ردیف</th><th>عکس</th><th>نام</th><th>سلسله دسته‌بندی</th><th>قیمت</th><th>توضیح کوتاه</th><th>وضعیت SKU</th><th>عملیات</th>
+                    <th>ردیف</th><th>عکس</th><th>نام</th><th>سلسله دسته‌بندی</th><th>قیمت</th><th>توضیح کوتاه</th><th>وضعیت</th><th>عملیات</th>
                 </tr>
             </thead>
             <tbody>
                 <?php $row_number = 1; foreach ($selection as $source_product_id => $entry) :
                     $source_product_id = (int) $source_product_id;
-                    $source_sku = (string) ($entry['source_sku'] ?? '');
-                    $is_duplicate = isset($imported_ids[$source_product_id]) || ($source_sku !== '' && isset($imported_skus[$source_sku]));
+                    $source_sku = (string) ($entry['sku'] ?? '');
+                    $status_row = $statuses[$source_product_id] ?? null;
+                    $status = $status_row['import_status'] ?? null;
+                    $is_blocked = in_array($status, array(HCI_DB::STATUS_IMPORTED, HCI_DB::STATUS_QUEUED, HCI_DB::STATUS_PROCESSING), true);
                     $price_display = self::compute_price_display($entry);
+
+                    $entry_payload = array(
+                        'name' => $entry['name'] ?? '',
+                        'short_description' => $entry['short_description'] ?? '',
+                        'featured_image' => $entry['featured_image'] ?? null,
+                        'images' => $entry['images'] ?? array(),
+                        'category_names' => $entry['category_names'] ?? array(),
+                        'product_type' => $entry['product_type'] ?? 'simple',
+                        'variations' => $entry['variations'] ?? array(),
+                        'sku' => $source_sku !== '' ? $source_sku : null,
+                        'price' => $entry['price'] ?? null,
+                        'stock_quantity' => $entry['stock_quantity'] ?? null,
+                    );
                     ?>
-                    <tr data-id="<?php echo esc_attr((string) $source_product_id); ?>">
+                    <tr data-id="<?php echo esc_attr((string) $source_product_id); ?>" data-sku="<?php echo esc_attr($source_sku); ?>" data-entry="<?php echo esc_attr((string) wp_json_encode($entry_payload)); ?>">
                         <td><?php echo esc_html((string) $row_number++); ?></td>
                         <td><?php if (!empty($entry['featured_image'])) : ?><img src="<?php echo esc_url($entry['featured_image']); ?>" style="width:48px;height:48px;object-fit:cover"><?php endif; ?></td>
-                        <td><input type="text" value="<?php echo esc_attr((string) ($entry['name'] ?? '')); ?>" style="width:100%"></td>
+                        <td><input type="text" class="hci-review-name" value="<?php echo esc_attr((string) ($entry['name'] ?? '')); ?>" style="width:100%"></td>
                         <td><?php echo esc_html(implode(' > ', (array) ($entry['category_names'] ?? array()))); ?></td>
                         <td<?php echo $price_display['title'] !== '' ? ' title="' . esc_attr($price_display['title']) . '"' : ''; ?>>
                             <?php echo esc_html($price_display['display']); ?>
                             <?php if ($price_display['is_range']) : ?><br><span style="font-size:10px;color:#787c82">(چند قیمتی — Hover کنید)</span><?php endif; ?>
                         </td>
-                        <td><textarea rows="2" style="width:100%"><?php echo esc_textarea((string) ($entry['short_description'] ?? '')); ?></textarea></td>
-                        <td>
-                            <?php if ($is_duplicate) : ?>
-                                <span style="color:#d63638;font-weight:bold">✕ قبلاً وارد شده</span>
-                            <?php else : ?>
-                                <span style="color:#008a20">✓ جدید</span>
-                            <?php endif; ?>
+                        <td><textarea class="hci-review-desc" rows="2" style="width:100%"><?php echo esc_textarea((string) ($entry['short_description'] ?? '')); ?></textarea></td>
+                        <td class="hci-status-cell" data-id="<?php echo esc_attr((string) $source_product_id); ?>">
+                            <?php echo self::render_status_badge($status, $status_row['error_message'] ?? ''); ?>
                         </td>
                         <td>
-                            <?php if ($is_duplicate) : ?>
-                                <button type="button" class="button" disabled>وارد کن</button>
+                            <?php if ($is_blocked) : ?>
+                                <button type="button" class="button" disabled><?php echo $status === HCI_DB::STATUS_IMPORTED ? 'وارد شده' : 'در صف/در حال انجام'; ?></button>
                             <?php else : ?>
-                                <button type="button" class="button hci-import-btn" data-id="<?php echo esc_attr((string) $source_product_id); ?>" data-sku="<?php echo esc_attr($source_sku); ?>">وارد کن</button>
+                                <button type="button" class="button hci-import-btn" data-id="<?php echo esc_attr((string) $source_product_id); ?>">
+                                    <?php echo in_array($status, array(HCI_DB::STATUS_ERROR, HCI_DB::STATUS_PARTIAL), true) ? 'تلاش مجدد' : 'وارد کن'; ?>
+                                </button>
                             <?php endif; ?>
                         </td>
                     </tr>
@@ -736,24 +759,132 @@ final class HCI_Products {
         </div>
         <script>
         (function () {
-            const nonce = <?php echo wp_json_encode(wp_create_nonce('hci_mark_pending')); ?>;
+            const queueNonce = <?php echo wp_json_encode(wp_create_nonce('hci_queue_import')); ?>;
+            const pollNonce = <?php echo wp_json_encode(wp_create_nonce('hci_poll_import_status')); ?>;
             const ajaxUrl = <?php echo wp_json_encode(admin_url('admin-ajax.php')); ?>;
+
+            const pendingIds = new Set();
+            let totalQueued = 0;
+            let doneCount = 0;
+            let pollTimer = null;
+
+            const statusLabels = {
+                imported: { text: 'وارد شد ✓', color: '#008a20' },
+                duplicate: { text: 'تکراری ✕', color: '#d63638' },
+                error: { text: 'خطا ✕', color: '#d63638' },
+                partial: { text: 'ناقص ⚠', color: '#b26b00' },
+                processing: { text: 'در حال Import…', color: '#787c82' },
+                queued: { text: 'در صف…', color: '#787c82' }
+            };
+
+            function updateCounter() {
+                const el = document.getElementById('hci-import-counter');
+                if (el) el.textContent = totalQueued > 0 ? (doneCount + ' از ' + totalQueued) : '';
+            }
+
+            function setRowStatus(id, statusKey, message) {
+                const cell = document.querySelector('.hci-status-cell[data-id="' + id + '"]');
+                if (!cell) return;
+                const info = statusLabels[statusKey] || { text: statusKey, color: '#787c82' };
+                cell.innerHTML = '';
+                const span = document.createElement('span');
+                span.style.color = info.color;
+                span.style.fontWeight = 'bold';
+                span.textContent = info.text;
+                if (message) { span.title = message; }
+                cell.appendChild(span);
+            }
+
+            function markQueuedUI(id) {
+                setRowStatus(id, 'queued', '');
+                const btn = document.querySelector('.hci-import-btn[data-id="' + id + '"]');
+                if (btn) { btn.disabled = true; btn.textContent = 'در صف…'; }
+            }
+
+            function poll() {
+                if (pendingIds.size === 0) {
+                    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+                    return;
+                }
+                const body = new URLSearchParams();
+                body.set('action', 'hci_poll_import_status');
+                body.set('_ajax_nonce', pollNonce);
+                body.set('source_product_ids', Array.from(pendingIds).join(','));
+                fetch(ajaxUrl, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString() })
+                    .then(function (r) { return r.json(); })
+                    .then(function (d) {
+                        if (!d || !d.success) return;
+                        const statuses = d.data.statuses || {};
+                        Object.keys(statuses).forEach(function (id) {
+                            const info = statuses[id];
+                            const status = info.import_status;
+                            if (status === 'processing') {
+                                setRowStatus(id, 'processing', '');
+                                return;
+                            }
+                            if (['imported', 'duplicate', 'error', 'partial'].indexOf(status) === -1) {
+                                return;
+                            }
+                            setRowStatus(id, status, info.error_message || '');
+                            const btn = document.querySelector('.hci-import-btn[data-id="' + id + '"]');
+                            if (btn) {
+                                if (status === 'error' || status === 'partial') {
+                                    btn.disabled = false;
+                                    btn.textContent = 'تلاش مجدد';
+                                } else {
+                                    btn.remove();
+                                }
+                            }
+                            if (pendingIds.has(id)) {
+                                pendingIds.delete(id);
+                                doneCount++;
+                                updateCounter();
+                            }
+                        });
+                    });
+            }
+
+            function startPolling() {
+                if (pollTimer) return;
+                pollTimer = setInterval(poll, 2000);
+                poll();
+            }
+
+            function buildEntry(row) {
+                let entry = {};
+                try { entry = JSON.parse(row.getAttribute('data-entry') || '{}'); } catch (e) { entry = {}; }
+                const nameInput = row.querySelector('.hci-review-name');
+                const descInput = row.querySelector('.hci-review-desc');
+                entry.name = nameInput ? nameInput.value : entry.name;
+                entry.short_description = descInput ? descInput.value : entry.short_description;
+                return entry;
+            }
+
             document.querySelectorAll('.hci-import-btn').forEach(function (btn) {
                 btn.addEventListener('click', function () {
+                    const row = btn.closest('tr');
+                    const id = row.getAttribute('data-id');
                     btn.disabled = true;
+
                     const body = new URLSearchParams();
-                    body.set('action', 'hci_mark_pending');
-                    body.set('_ajax_nonce', nonce);
-                    body.set('source_product_id', btn.getAttribute('data-id'));
-                    body.set('source_sku', btn.getAttribute('data-sku') || '');
+                    body.set('action', 'hci_queue_import');
+                    body.set('_ajax_nonce', queueNonce);
+                    body.set('source_product_id', id);
+                    body.set('source_sku', row.getAttribute('data-sku') || '');
+                    body.set('entry_json', JSON.stringify(buildEntry(row)));
+
                     fetch(ajaxUrl, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString() })
                         .then(function (r) { return r.json(); })
                         .then(function (d) {
                             if (d && d.success) {
-                                btn.textContent = 'ثبت شد ✓';
+                                totalQueued++;
+                                pendingIds.add(id);
+                                markQueuedUI(id);
+                                updateCounter();
+                                startPolling();
                             } else {
                                 btn.disabled = false;
-                                alert((d && d.data && d.data.message) ? d.data.message : 'خطا در ثبت.');
+                                alert((d && d.data && d.data.message) ? d.data.message : 'خطا در صف‌بندی.');
                             }
                         })
                         .catch(function () {
@@ -762,29 +893,74 @@ final class HCI_Products {
                         });
                 });
             });
+
+            const batchBtn = document.getElementById('hci-import-batch');
+            if (batchBtn) {
+                batchBtn.addEventListener('click', function () {
+                    const items = [];
+                    const rows = [];
+                    document.querySelectorAll('.hci-import-btn:not(:disabled)').forEach(function (btn) {
+                        const row = btn.closest('tr');
+                        items.push({
+                            source_product_id: parseInt(row.getAttribute('data-id'), 10),
+                            source_sku: row.getAttribute('data-sku') || '',
+                            entry: buildEntry(row)
+                        });
+                        rows.push(row);
+                    });
+                    if (!items.length) { return; }
+                    batchBtn.disabled = true;
+
+                    const body = new URLSearchParams();
+                    body.set('action', 'hci_queue_batch_import');
+                    body.set('_ajax_nonce', queueNonce);
+                    body.set('items', JSON.stringify(items));
+
+                    fetch(ajaxUrl, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString() })
+                        .then(function (r) { return r.json(); })
+                        .then(function (d) {
+                            batchBtn.disabled = false;
+                            if (!d || !d.success) { alert('خطا در صف‌بندی دسته‌ای.'); return; }
+                            const skippedIds = (d.data.skipped || []).map(function (s) { return String(s.source_product_id); });
+                            rows.forEach(function (row) {
+                                const id = row.getAttribute('data-id');
+                                if (skippedIds.indexOf(id) === -1) {
+                                    totalQueued++;
+                                    pendingIds.add(id);
+                                    markQueuedUI(id);
+                                } else {
+                                    const btn = row.querySelector('.hci-import-btn');
+                                    if (btn) { btn.disabled = false; }
+                                }
+                            });
+                            updateCounter();
+                            startPolling();
+                        })
+                        .catch(function () {
+                            batchBtn.disabled = false;
+                            alert('خطا در ارتباط.');
+                        });
+                });
+            }
         })();
         </script>
         <?php
     }
 
-    public static function ajax_mark_pending(): void {
-        if (!current_user_can(self::CAPABILITY)) {
-            wp_send_json_error(array('message' => 'Access denied.'), 403);
+    private static function render_status_badge(?string $status, string $message): string {
+        $map = array(
+            HCI_DB::STATUS_IMPORTED => array('وارد شد ✓', '#008a20'),
+            HCI_DB::STATUS_DUPLICATE => array('تکراری ✕', '#d63638'),
+            HCI_DB::STATUS_ERROR => array('خطا ✕', '#d63638'),
+            HCI_DB::STATUS_PARTIAL => array('ناقص ⚠', '#b26b00'),
+            HCI_DB::STATUS_PROCESSING => array('در حال Import…', '#787c82'),
+            HCI_DB::STATUS_QUEUED => array('در صف…', '#787c82'),
+        );
+        if ($status === null || !isset($map[$status])) {
+            return '<span style="color:#787c82">آماده</span>';
         }
-        check_ajax_referer('hci_mark_pending');
-
-        $source_product_id = isset($_POST['source_product_id']) ? (int) $_POST['source_product_id'] : 0;
-        $source_sku = isset($_POST['source_sku']) ? sanitize_text_field(wp_unslash($_POST['source_sku'])) : '';
-
-        if ($source_product_id <= 0) {
-            wp_send_json_error(array('message' => 'source_product_id نامعتبر است.'), 400);
-        }
-
-        if (in_array($source_product_id, HCI_DB::get_imported_source_ids(), true)) {
-            wp_send_json_error(array('message' => 'این محصول قبلاً ثبت شده است.'), 409);
-        }
-
-        $result = HCI_DB::insert_pending($source_product_id, $source_sku !== '' ? $source_sku : null);
-        $result['success'] ? wp_send_json_success($result) : wp_send_json_error($result, 500);
+        [$label, $color] = $map[$status];
+        $title = $message !== '' ? ' title="' . esc_attr($message) . '"' : '';
+        return '<span style="color:' . esc_attr($color) . ';font-weight:bold"' . $title . '>' . esc_html($label) . '</span>';
     }
 }

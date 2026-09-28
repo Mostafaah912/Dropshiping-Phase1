@@ -12,9 +12,11 @@ declare(strict_types=1);
 define('ABSPATH', __DIR__ . '/fake-wp/');
 define('ARRAY_A', 'ARRAY_A');
 define('MINUTE_IN_SECONDS', 60);
-define('HMW_VERSION', '1.9.0-test');
+define('HOUR_IN_SECONDS', 3600);
+define('DAY_IN_SECONDS', 86400);
+define('HMW_VERSION', '1.9.1-test');
 define('HMW_TIMEZONE', 'Asia/Tehran');
-define('HCI_VERSION', '0.2.0-test');
+define('HCI_VERSION', '0.3.0-test');
 
 // ---------------------------------------------------------------------------
 // توابع عمومی WordPress (حداقلی، فقط آنچه فایل‌های production واقعاً صدا می‌زنند)
@@ -286,6 +288,7 @@ final class WP_REST_Response {
 final class Fake_WPDB {
     public string $prefix = 'wp_';
     public string $last_error = '';
+    public int $insert_id = 0;
     private PDO $pdo;
 
     public function __construct(PDO $pdo) {
@@ -368,6 +371,9 @@ final class Fake_WPDB {
         $sql = 'INSERT INTO ' . $table . ' (' . implode(',', $columns) . ') VALUES (' . implode(',', $placeholders) . ')';
         $stmt = $this->pdo->prepare($sql);
         $ok = $stmt->execute(array_values($data));
+        if ($ok) {
+            $this->insert_id = (int) $this->pdo->lastInsertId();
+        }
         return $ok ? 1 : false;
     }
 
@@ -468,6 +474,8 @@ function hci_test_create_product_map_db(): Fake_WPDB {
             dest_product_id INTEGER NULL,
             dest_variation_id INTEGER NULL,
             dest_sku TEXT NULL,
+            import_payload TEXT NULL,
+            error_message TEXT NULL,
             last_synced_at TEXT NULL,
             import_status TEXT NOT NULL DEFAULT 'pending',
             created_at TEXT NULL,
@@ -475,6 +483,248 @@ function hci_test_create_product_map_db(): Fake_WPDB {
         )
     SQL);
     return new Fake_WPDB($pdo);
+}
+
+// ---------------------------------------------------------------------------
+// لایه Fake WooCommerce/WP — فقط زیرمجموعه‌ای از توابع/کلاس‌های واقعی
+// WooCommerce که class-hci-import.php/class-hci-sync.php واقعاً صدا می‌زنند،
+// پشت یک فروشگاه ساده در حافظه ($GLOBALS). هدف تست‌کردن منطق خودِ ما
+// (SKU/Duplicate/Category/Price/Stock) است، نه بازسازی کامل ووکامرس.
+// ---------------------------------------------------------------------------
+
+$GLOBALS['__fake_wc_products'] = array();
+$GLOBALS['__fake_wc_next_id'] = 1000;
+$GLOBALS['__fake_wc_sku_index'] = array();
+$GLOBALS['__fake_wc_terms'] = array();
+$GLOBALS['__fake_wc_next_term_id'] = 1;
+$GLOBALS['__fake_postmeta'] = array();
+$GLOBALS['__fake_media_sideload_fail_urls'] = array();
+$GLOBALS['__fake_as_single_actions'] = array();
+$GLOBALS['__fake_as_recurring_actions'] = array();
+
+function hci_test_reset_wc_fakes(): void {
+    $GLOBALS['__fake_wc_products'] = array();
+    $GLOBALS['__fake_wc_next_id'] = 1000;
+    $GLOBALS['__fake_wc_sku_index'] = array();
+    $GLOBALS['__fake_wc_terms'] = array();
+    $GLOBALS['__fake_wc_next_term_id'] = 1;
+    $GLOBALS['__fake_postmeta'] = array();
+    $GLOBALS['__fake_media_sideload_fail_urls'] = array();
+    $GLOBALS['__fake_as_single_actions'] = array();
+    $GLOBALS['__fake_as_recurring_actions'] = array();
+}
+
+class WC_Product {
+    protected int $id = 0;
+    protected string $product_type = 'simple';
+    protected array $data = array(
+        'status' => 'draft',
+        'name' => '',
+        'short_description' => '',
+        'sku' => '',
+        'regular_price' => '',
+        'price' => '',
+        'manage_stock' => false,
+        'stock_quantity' => null,
+        'stock_status' => 'outofstock',
+        'category_ids' => array(),
+        'image_id' => 0,
+        'gallery_image_ids' => array(),
+        'parent_id' => 0,
+        'attributes' => array(),
+    );
+
+    public function __construct(int $id = 0) {
+        if ($id > 0 && isset($GLOBALS['__fake_wc_products'][$id])) {
+            $this->id = $id;
+            $this->data = $GLOBALS['__fake_wc_products'][$id]['data'];
+            $this->product_type = $GLOBALS['__fake_wc_products'][$id]['type'];
+        }
+    }
+
+    public function get_id(): int { return $this->id; }
+    public function get_type(): string { return $this->product_type; }
+
+    public function set_status(string $v): void { $this->data['status'] = $v; }
+    public function get_status(): string { return $this->data['status']; }
+    public function set_name(string $v): void { $this->data['name'] = $v; }
+    public function get_name(): string { return $this->data['name']; }
+    public function set_short_description(string $v): void { $this->data['short_description'] = $v; }
+    public function get_short_description(): string { return $this->data['short_description']; }
+    public function set_sku(string $v): void { $this->data['sku'] = $v; }
+    public function get_sku(): string { return $this->data['sku']; }
+    public function set_regular_price(string $v): void { $this->data['regular_price'] = $v; }
+    public function get_regular_price(): string { return $this->data['regular_price']; }
+    public function set_price(string $v): void { $this->data['price'] = $v; }
+    public function get_price(): string { return $this->data['price']; }
+    public function set_manage_stock(bool $v): void { $this->data['manage_stock'] = $v; }
+    public function get_manage_stock(): bool { return $this->data['manage_stock']; }
+    public function set_stock_quantity($v): void { $this->data['stock_quantity'] = $v; }
+    public function get_stock_quantity() { return $this->data['stock_quantity']; }
+    public function set_stock_status(string $v): void { $this->data['stock_status'] = $v; }
+    public function get_stock_status(): string { return $this->data['stock_status']; }
+    public function set_category_ids(array $v): void { $this->data['category_ids'] = $v; }
+    public function get_category_ids(): array { return $this->data['category_ids']; }
+    public function set_image_id($v): void { $this->data['image_id'] = $v; }
+    public function get_image_id() { return $this->data['image_id']; }
+    public function set_gallery_image_ids(array $v): void { $this->data['gallery_image_ids'] = $v; }
+    public function get_gallery_image_ids(): array { return $this->data['gallery_image_ids']; }
+    public function set_parent_id($v): void { $this->data['parent_id'] = $v; }
+    public function get_parent_id() { return $this->data['parent_id']; }
+    public function set_attributes(array $v): void { $this->data['attributes'] = $v; }
+    public function get_attributes(): array { return $this->data['attributes']; }
+
+    public function save(): int {
+        if ($this->id <= 0) {
+            $this->id = $GLOBALS['__fake_wc_next_id']++;
+        }
+        $GLOBALS['__fake_wc_products'][$this->id] = array('type' => $this->product_type, 'data' => $this->data);
+        if (!empty($this->data['sku'])) {
+            $GLOBALS['__fake_wc_sku_index'][$this->data['sku']] = $this->id;
+        }
+        return $this->id;
+    }
+}
+
+class WC_Product_Simple extends WC_Product {
+    protected string $product_type = 'simple';
+}
+
+class WC_Product_Variable extends WC_Product {
+    protected string $product_type = 'variable';
+}
+
+class WC_Product_Variation extends WC_Product {
+    protected string $product_type = 'variation';
+}
+
+class WC_Product_Attribute {
+    private int $id = 0;
+    private string $name = '';
+    private array $options = array();
+    private bool $visible = false;
+    private bool $variation = false;
+
+    public function set_id(int $v): void { $this->id = $v; }
+    public function get_id(): int { return $this->id; }
+    public function set_name(string $v): void { $this->name = $v; }
+    public function get_name(): string { return $this->name; }
+    public function set_options(array $v): void { $this->options = $v; }
+    public function get_options(): array { return $this->options; }
+    public function set_visible(bool $v): void { $this->visible = $v; }
+    public function get_visible(): bool { return $this->visible; }
+    public function set_variation(bool $v): void { $this->variation = $v; }
+    public function get_variation(): bool { return $this->variation; }
+}
+
+function wc_get_product(int $id) {
+    if (!isset($GLOBALS['__fake_wc_products'][$id])) {
+        return false;
+    }
+    $type = $GLOBALS['__fake_wc_products'][$id]['type'];
+    $class = $type === 'variable' ? 'WC_Product_Variable' : ($type === 'variation' ? 'WC_Product_Variation' : 'WC_Product_Simple');
+    return new $class($id);
+}
+
+function wc_get_product_id_by_sku(string $sku): int {
+    return (int) ($GLOBALS['__fake_wc_sku_index'][$sku] ?? 0);
+}
+
+function term_exists($term, string $taxonomy = '', $parent = null) {
+    foreach ($GLOBALS['__fake_wc_terms'][$taxonomy] ?? array() as $term_id => $t) {
+        if ($t['name'] === $term && (int) $t['parent'] === (int) ($parent ?? 0)) {
+            return array('term_id' => $term_id, 'term_taxonomy_id' => $term_id);
+        }
+    }
+    return null;
+}
+
+function wp_insert_term(string $term, string $taxonomy = '', array $args = array()) {
+    $term_id = $GLOBALS['__fake_wc_next_term_id']++;
+    $GLOBALS['__fake_wc_terms'][$taxonomy][$term_id] = array('name' => $term, 'parent' => (int) ($args['parent'] ?? 0));
+    return array('term_id' => $term_id, 'term_taxonomy_id' => $term_id);
+}
+
+function get_posts(array $args = array()) {
+    if (($args['post_type'] ?? '') === 'attachment' && !empty($args['meta_key']) && array_key_exists('meta_value', $args)) {
+        $matches = array();
+        foreach ($GLOBALS['__fake_postmeta'] as $post_id => $meta) {
+            if (($meta[$args['meta_key']] ?? null) === $args['meta_value']) {
+                $matches[] = $post_id;
+            }
+        }
+        return $matches;
+    }
+    return array();
+}
+
+/** برای تست: هر URL در این لیست، شکست دانلود را شبیه‌سازی می‌کند. */
+function hci_test_fail_image_download(string $url): void {
+    $GLOBALS['__fake_media_sideload_fail_urls'][$url] = true;
+}
+
+function media_sideload_image(string $url, $post_id = 0, $desc = null, string $return_type = 'html') {
+    if (!empty($GLOBALS['__fake_media_sideload_fail_urls'][$url])) {
+        return new WP_Error('media_sideload_image_failed', 'دانلود تصویر شبیه‌سازی‌شده شکست خورد.');
+    }
+    $id = $GLOBALS['__fake_wc_next_id']++;
+    $GLOBALS['__fake_postmeta'][$id] = $GLOBALS['__fake_postmeta'][$id] ?? array();
+    return $id;
+}
+
+function update_post_meta(int $post_id, string $key, $value): bool {
+    $GLOBALS['__fake_postmeta'][$post_id][$key] = $value;
+    return true;
+}
+
+function get_post_meta(int $post_id, string $key = '', bool $single = false) {
+    if ($key === '') {
+        return $GLOBALS['__fake_postmeta'][$post_id] ?? array();
+    }
+    $value = $GLOBALS['__fake_postmeta'][$post_id][$key] ?? ($single ? '' : array());
+    return $single ? $value : array($value);
+}
+
+function sanitize_title(string $s): string {
+    return strtolower(trim(preg_replace('/\s+/', '-', $s) ?? $s));
+}
+
+function wp_kses_post(string $s): string {
+    return $s;
+}
+
+function esc_url_raw(string $s): string {
+    return $s;
+}
+
+function wp_die($message = ''): void {
+    throw new RuntimeException(is_string($message) ? $message : 'wp_die');
+}
+
+// --- Action Scheduler (WooCommerce) — فقط Recorder، هیچ Queue واقعی اجرا نمی‌کند ---
+
+function as_schedule_single_action(int $timestamp, string $hook, array $args = array(), string $group = ''): int {
+    $GLOBALS['__fake_as_single_actions'][] = compact('timestamp', 'hook', 'args', 'group');
+    return count($GLOBALS['__fake_as_single_actions']);
+}
+
+function as_schedule_recurring_action(int $timestamp, int $interval, string $hook, array $args = array(), string $group = ''): int {
+    $GLOBALS['__fake_as_recurring_actions'][] = compact('timestamp', 'interval', 'hook', 'args', 'group');
+    return count($GLOBALS['__fake_as_recurring_actions']);
+}
+
+function as_next_scheduled_action(string $hook, $args = null, string $group = '') {
+    foreach ($GLOBALS['__fake_as_single_actions'] as $a) {
+        if ($a['hook'] === $hook) {
+            return $a['timestamp'];
+        }
+    }
+    foreach ($GLOBALS['__fake_as_recurring_actions'] as $a) {
+        if ($a['hook'] === $hook) {
+            return $a['timestamp'];
+        }
+    }
+    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -491,6 +741,8 @@ require_once HCI_REPO_ROOT . '/includes/class-hci-db.php';
 require_once HCI_REPO_ROOT . '/includes/class-hci-source-client.php';
 require_once HCI_REPO_ROOT . '/includes/class-hci-pricing.php';
 require_once HCI_REPO_ROOT . '/includes/class-hci-products.php';
+require_once HCI_REPO_ROOT . '/includes/class-hci-import.php';
+require_once HCI_REPO_ROOT . '/includes/class-hci-sync.php';
 
 // ---------------------------------------------------------------------------
 // Assertion helpers ساده

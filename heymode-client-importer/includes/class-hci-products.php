@@ -12,7 +12,7 @@ final class HCI_Products {
         add_action('admin_menu', array(__CLASS__, 'admin_menu'), 20);
         add_action('admin_post_hci_next_step', array(__CLASS__, 'handle_next_step'));
         add_action('admin_post_hci_refresh_products', array(__CLASS__, 'handle_refresh_products'));
-        add_action('wp_ajax_hci_mark_pending', array(__CLASS__, 'ajax_mark_pending'));
+        add_action('wp_ajax_hci_remove_review_row', array(__CLASS__, 'ajax_remove_review_row'));
     }
 
     public static function admin_menu(): void {
@@ -695,6 +695,48 @@ final class HCI_Products {
         exit;
     }
 
+    /**
+     * ردیف‌های کاملاً واردشده را از انتخاب ذخیره‌شده کاربر برمی‌دارد و باقی را برمی‌گرداند.
+     */
+    private static function prune_imported_rows(array $selection, array $statuses): array {
+        $changed = false;
+        foreach (array_keys($selection) as $id) {
+            if (($statuses[(int) $id]['import_status'] ?? null) === HCI_DB::STATUS_IMPORTED) {
+                unset($selection[$id]);
+                $changed = true;
+            }
+        }
+        if ($changed) {
+            set_transient(self::selection_key(), $selection, self::SELECTION_TTL);
+        }
+        return $selection;
+    }
+
+    /**
+     * «حذف از این لیست»: فقط از انتخاب ذخیره‌شده همین کاربر برداشته می‌شود.
+     * ردیفی که در صف یا در حال وارد شدن است حذف نمی‌شود (باید اول کارش تمام شود).
+     */
+    public static function ajax_remove_review_row(): void {
+        if (!current_user_can(self::CAPABILITY)) {
+            wp_send_json_error(array('message' => 'اجازه دسترسی ندارید.'), 403);
+        }
+        check_ajax_referer('hci_remove_review_row');
+
+        $id = isset($_POST['source_product_id']) ? (int) $_POST['source_product_id'] : 0;
+        $statuses = HCI_DB::get_import_statuses(array($id));
+        $status = $statuses[$id]['import_status'] ?? null;
+        if (in_array($status, array(HCI_DB::STATUS_QUEUED, HCI_DB::STATUS_PROCESSING), true)) {
+            wp_send_json_error(array('message' => 'این محصول در حال وارد شدن است. بعد از پایان کار می‌توانید آن را از لیست حذف کنید.'), 409);
+        }
+
+        $selection = get_transient(self::selection_key());
+        if (is_array($selection) && isset($selection[$id])) {
+            unset($selection[$id]);
+            set_transient(self::selection_key(), $selection, self::SELECTION_TTL);
+        }
+        wp_send_json_success(array('removed' => $id));
+    }
+
     public static function handle_refresh_products(): void {
         self::guard();
         check_admin_referer('hci_refresh_products');
@@ -786,9 +828,17 @@ final class HCI_Products {
         // هم باشد، نه فقط imported.
         $statuses = HCI_DB::get_import_statuses(array_keys($selection));
 
+        // محصولی که کاملاً وارد شده دیگر «در حال بررسی» نیست: از لیست حذف
+        // می‌شود (نه فقط دکمه‌اش غیرفعال) تا جدول فقط کارهای باقی‌مانده را نشان دهد.
+        $selection = self::prune_imported_rows($selection, $statuses);
+        if (!$selection) {
+            echo '<p>همه محصولات انتخاب‌شده با موفقیت وارد شدند و چیزی برای بازبینی باقی نمانده. <a href="' . esc_url(admin_url('admin.php?page=heymode-client-importer-products')) . '">بازگشت به محصولات</a></p></div>';
+            return;
+        }
+
         ?>
         <p>
-            <button type="button" class="button button-primary" id="hci-import-batch">Import همه (ردیف‌های معتبر)</button>
+            <button type="button" class="button button-primary" id="hci-import-batch">وارد کردن همه</button>
             <strong id="hci-import-counter" style="margin-right:10px"></strong>
         </p>
         <table class="widefat striped" style="max-width:1200px">
@@ -803,7 +853,7 @@ final class HCI_Products {
                     $source_sku = (string) ($entry['sku'] ?? '');
                     $status_row = $statuses[$source_product_id] ?? null;
                     $status = $status_row['import_status'] ?? null;
-                    $is_blocked = in_array($status, array(HCI_DB::STATUS_IMPORTED, HCI_DB::STATUS_QUEUED, HCI_DB::STATUS_PROCESSING), true);
+                    $is_blocked = in_array($status, array(HCI_DB::STATUS_QUEUED, HCI_DB::STATUS_PROCESSING), true);
                     $price_display = self::compute_price_display($entry);
 
                     $entry_payload = array(
@@ -836,12 +886,14 @@ final class HCI_Products {
                         </td>
                         <td>
                             <?php if ($is_blocked) : ?>
-                                <button type="button" class="button" disabled><?php echo $status === HCI_DB::STATUS_IMPORTED ? 'وارد شده' : 'در صف/در حال انجام'; ?></button>
+                                <button type="button" class="button" disabled>در حال وارد شدن…</button>
                             <?php else : ?>
                                 <button type="button" class="button hci-import-btn" data-id="<?php echo esc_attr((string) $source_product_id); ?>">
                                     <?php echo in_array($status, array(HCI_DB::STATUS_ERROR, HCI_DB::STATUS_PARTIAL), true) ? 'تلاش مجدد' : 'وارد کن'; ?>
                                 </button>
                             <?php endif; ?>
+                            <button type="button" class="button-link hci-remove-row" data-id="<?php echo esc_attr((string) $source_product_id); ?>" style="margin-right:8px;color:#b32d2e"
+                                <?php echo $is_blocked ? 'disabled title="این محصول در حال وارد شدن است؛ بعد از پایان کار می‌توانید آن را از لیست حذف کنید."' : 'title="فقط از این لیست برداشته می‌شود؛ به محصول شما آسیبی نمی‌زند."'; ?>>حذف از این لیست</button>
                         </td>
                     </tr>
                 <?php endforeach; ?>
@@ -872,6 +924,41 @@ final class HCI_Products {
                     }
                 } catch (e) { /* localStorage در دسترس نیست — بی‌ضرر نادیده گرفته می‌شود */ }
             }
+
+            const removeNonce = <?php echo wp_json_encode(wp_create_nonce('hci_remove_review_row')); ?>;
+
+            // ردیفی که کامل وارد شده یا کارمند کنارش گذاشته، از جدول برداشته می‌شود.
+            function removeRow(id) {
+                const row = document.querySelector('tr[data-id="' + id + '"]');
+                if (row) { row.remove(); }
+                removeFromLocalSelection(id);
+                if (!document.querySelector('tr[data-id]')) {
+                    const table = document.querySelector('table.widefat');
+                    if (table) {
+                        const note = document.createElement('p');
+                        note.textContent = 'چیزی برای بازبینی باقی نمانده.';
+                        table.parentNode.replaceChild(note, table);
+                    }
+                }
+            }
+
+            document.querySelectorAll('.hci-remove-row').forEach(function (b) {
+                b.addEventListener('click', function () {
+                    if (b.disabled) return;
+                    const id = b.getAttribute('data-id');
+                    const body = new URLSearchParams();
+                    body.set('action', 'hci_remove_review_row');
+                    body.set('_ajax_nonce', removeNonce);
+                    body.set('source_product_id', id);
+                    fetch(ajaxUrl, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body.toString() })
+                        .then(function (r) { return r.json(); })
+                        .then(function (d) {
+                            if (d && d.success) { removeRow(id); }
+                            else { alert((d && d.data && d.data.message) ? d.data.message : 'حذف انجام نشد. دوباره تلاش کنید.'); }
+                        })
+                        .catch(function () { alert('ارتباط برقرار نشد. دوباره تلاش کنید.'); });
+                });
+            });
 
             const pendingIds = new Set();
             let totalQueued = 0;
@@ -945,6 +1032,7 @@ final class HCI_Products {
                                     btn.remove();
                                 }
                             }
+                            if (status === 'imported') { removeRow(id); }
                             if (pendingIds.has(id)) {
                                 pendingIds.delete(id);
                                 doneCount++;
@@ -991,6 +1079,7 @@ final class HCI_Products {
                                 btn.remove();
                             }
                         }
+                        if (status === 'imported') { removeRow(id); }
                         if (pendingIds.has(id)) {
                             pendingIds.delete(id);
                             doneCount++;

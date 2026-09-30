@@ -35,7 +35,7 @@ final class HCI_Sync {
     }
 
     public static function admin_menu(): void {
-        add_submenu_page('heymode-client-importer', 'سینک روزانه', 'سینک روزانه', self::CAPABILITY, 'heymode-client-importer-sync', array(__CLASS__, 'render_page'));
+        add_submenu_page('heymode-client-importer', 'بروزرسانی قیمت و موجودی', 'بروزرسانی قیمت و موجودی', self::CAPABILITY, 'heymode-client-importer-sync', array(__CLASS__, 'render_page'));
     }
 
     public static function handle_sync_now(): void {
@@ -48,6 +48,68 @@ final class HCI_Sync {
         exit;
     }
 
+    public static function to_persian_digits(string $text): string {
+        return strtr($text, array('0' => '۰', '1' => '۱', '2' => '۲', '3' => '۳', '4' => '۴', '5' => '۵', '6' => '۶', '7' => '۷', '8' => '۸', '9' => '۹'));
+    }
+
+    /**
+     * زمان را به فارسی روزمره و به وقت تهران می‌نویسد: «امروز ساعت ۰۹:۰۱»،
+     * «دیروز ساعت ۰۶:۰۰»، «فردا ساعت ۰۶:۰۰» یا تاریخ ساده برای روزهای دیگر.
+     */
+    public static function format_friendly_time(int $timestamp, ?int $now = null): string {
+        $tz = new DateTimeZone(self::TIMEZONE);
+        $moment = (new DateTimeImmutable('@' . $timestamp))->setTimezone($tz);
+        $today = (new DateTimeImmutable('@' . ($now ?? time())))->setTimezone($tz)->setTime(0, 0, 0);
+        $day = $moment->setTime(0, 0, 0);
+        $diff_days = (int) round(($day->getTimestamp() - $today->getTimestamp()) / DAY_IN_SECONDS);
+        $clock = self::to_persian_digits($moment->format('H:i'));
+
+        if ($diff_days === 0) {
+            return 'امروز ساعت ' . $clock;
+        }
+        if ($diff_days === -1) {
+            return 'دیروز ساعت ' . $clock;
+        }
+        if ($diff_days === 1) {
+            return 'فردا ساعت ' . $clock;
+        }
+        return self::to_persian_digits($moment->format('d/m/Y')) . ' ساعت ' . $clock;
+    }
+
+    /**
+     * خلاصه آخرین بروزرسانی به جمله‌های ساده (بدون اصطلاح فنی).
+     * @return string[]
+     */
+    public static function describe_changes(?array $summary): array {
+        if (!is_array($summary)) {
+            return array('هنوز بروزرسانی‌ای انجام نشده است.');
+        }
+        if (empty($summary['success'])) {
+            return array('آخرین تلاش برای بروزرسانی انجام نشد. برنامه چند دقیقه بعد خودکار دوباره تلاش می‌کند و تا آن موقع قیمت و موجودی فروشگاه شما دست‌نخورده می‌ماند.');
+        }
+        $lines = array();
+        $price = (int) ($summary['price_updated'] ?? 0);
+        $stock = (int) ($summary['stock_updated'] ?? 0);
+        $gone = (int) ($summary['deactivated'] ?? 0);
+        $errors = (int) ($summary['errors'] ?? 0);
+        if ($price > 0) {
+            $lines[] = self::to_persian_digits((string) $price) . ' محصول قیمتشان تغییر کرد.';
+        }
+        if ($stock > 0) {
+            $lines[] = self::to_persian_digits((string) $stock) . ' محصول موجودی‌اش تغییر کرد.';
+        }
+        if ($gone > 0) {
+            $lines[] = self::to_persian_digits((string) $gone) . ' محصول دیگر در هی‌مد فروخته نمی‌شود و در فروشگاه شما ناموجود شد.';
+        }
+        if ($errors > 0) {
+            $lines[] = self::to_persian_digits((string) $errors) . ' محصول به‌روز نشد؛ در بروزرسانی بعدی دوباره امتحان می‌شود.';
+        }
+        if (!$lines) {
+            $lines[] = 'در آخرین بروزرسانی چیزی برای تغییر نبود.';
+        }
+        return $lines;
+    }
+
     public static function render_page(): void {
         if (!current_user_can(self::CAPABILITY)) {
             wp_die(esc_html__('Access denied.', 'heymode-client-importer'));
@@ -56,51 +118,60 @@ final class HCI_Sync {
         $cursor = (string) get_option(self::CURSOR_OPTION, '');
         $summary = get_option(self::SUMMARY_OPTION, null);
         $next_run = function_exists('as_next_scheduled_action') ? as_next_scheduled_action(self::DAILY_HOOK, array(), self::GROUP) : false;
+        $last_ts = $cursor !== '' ? strtotime($cursor . ' UTC') : false;
+        $imported_count = count(HCI_DB::get_imported_parent_rows());
         ?>
         <div class="wrap">
-            <h1>سینک روزانه قیمت/موجودی</h1>
+            <h1>بروزرسانی قیمت و موجودی</h1>
+            <p>هر روز صبح ساعت ۶، قیمت و موجودی محصولاتی که از هی‌مد وارد کرده‌اید خودکار با هی‌مد هماهنگ می‌شود.</p>
 
             <?php if ($notice === 'synced') : ?>
-                <div class="notice notice-success is-dismissible"><p>سینک دستی اجرا شد — نتیجه در گزارش پایین صفحه.</p></div>
+                <?php $ok = is_array($summary) && !empty($summary['success']); ?>
+                <div class="notice notice-<?php echo $ok ? 'success' : 'warning'; ?> is-dismissible"><p><?php echo $ok ? 'بروزرسانی انجام شد.' : 'بروزرسانی انجام نشد. کمی بعد دوباره تلاش کنید.'; ?></p></div>
             <?php endif; ?>
 
-            <table class="widefat striped" style="max-width:900px;margin-bottom:20px">
-                <tbody>
-                    <tr><td style="width:220px"><strong>آخرین Cursor موفق</strong></td><td><?php echo $cursor !== '' ? esc_html($cursor) . ' UTC' : 'هنوز سینک موفقی انجام نشده'; ?></td></tr>
-                    <tr><td><strong>اجرای بعدی برنامه‌ریزی‌شده</strong></td><td><?php echo $next_run ? esc_html(wp_date('Y-m-d H:i:s', $next_run, new DateTimeZone(self::TIMEZONE))) . ' (تهران)' : 'زمان‌بندی نشده (Action Scheduler در دسترس نیست؟)'; ?></td></tr>
-                </tbody>
-            </table>
+            <div style="background:#fff;border:1px solid #dcdcde;border-radius:4px;padding:20px;max-width:640px;margin:16px 0">
+                <p style="margin:0;color:#50575e">تعداد محصولات وارد‌شده از هی‌مد</p>
+                <p style="margin:4px 0 16px;font-size:44px;font-weight:700;line-height:1"><?php echo esc_html(self::to_persian_digits((string) $imported_count)); ?></p>
+                <p style="margin:4px 0"><strong>آخرین بروزرسانی:</strong> <?php echo $last_ts ? esc_html(self::format_friendly_time((int) $last_ts)) : 'هنوز انجام نشده'; ?></p>
+                <p style="margin:4px 0"><strong>بروزرسانی بعدی:</strong> <?php echo $next_run ? esc_html(self::format_friendly_time((int) $next_run)) : 'هنوز زمان‌بندی نشده'; ?></p>
+            </div>
 
-            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+            <h2 style="margin-top:24px">در آخرین بروزرسانی چه شد؟</h2>
+            <ul style="list-style:disc;padding-right:20px">
+                <?php foreach (self::describe_changes(is_array($summary) ? $summary : null) as $line) : ?>
+                    <li><?php echo esc_html($line); ?></li>
+                <?php endforeach; ?>
+            </ul>
+
+            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" id="hci-sync-form" style="margin-top:20px">
                 <input type="hidden" name="action" value="hci_sync_now">
                 <?php wp_nonce_field('hci_sync_now'); ?>
-                <button type="submit" class="button button-primary">Sync Now</button>
+                <button type="submit" class="button button-primary" id="hci-sync-btn">بروزرسانی همین الان</button>
+                <span id="hci-sync-msg" style="margin-right:10px;color:#50575e"></span>
             </form>
+            <script>
+            document.getElementById('hci-sync-form').addEventListener('submit', function () {
+                var b = document.getElementById('hci-sync-btn');
+                b.disabled = true;
+                document.getElementById('hci-sync-msg').textContent = 'در حال بروزرسانی...';
+                setTimeout(function () { b.disabled = false; }, 60000);
+            });
+            </script>
 
-            <h2>آخرین گزارش سینک</h2>
-            <?php if (is_array($summary)) : ?>
-                <table class="widefat striped" style="max-width:900px">
-                    <tbody>
-                        <tr><td style="width:220px"><strong>زمان</strong></td><td><?php echo esc_html((string) ($summary['started_at'] ?? '')); ?> UTC</td></tr>
-                        <tr><td><strong>نوع اجرا</strong></td><td><?php echo !empty($summary['manual']) ? 'دستی (Sync Now)' : 'خودکار (زمان‌بندی‌شده)'; ?></td></tr>
-                        <tr><td><strong>وضعیت</strong></td><td><?php echo !empty($summary['success']) ? '<span style="color:#008a20">موفق</span>' : '<span style="color:#d63638">ناموفق</span>'; ?></td></tr>
-                        <tr><td><strong>بررسی‌شده</strong></td><td><?php echo esc_html((string) ($summary['checked'] ?? 0)); ?></td></tr>
-                        <tr><td><strong>قیمت به‌روزشده</strong></td><td><?php echo esc_html((string) ($summary['price_updated'] ?? 0)); ?></td></tr>
-                        <tr><td><strong>موجودی به‌روزشده</strong></td><td><?php echo esc_html((string) ($summary['stock_updated'] ?? 0)); ?></td></tr>
-                        <tr><td><strong>Out of Stock شده (منبع غیرفعال)</strong></td><td><?php echo esc_html((string) ($summary['deactivated'] ?? 0)); ?></td></tr>
-                        <tr><td><strong>خطاها</strong></td><td><?php echo esc_html((string) ($summary['errors'] ?? 0)); ?></td></tr>
-                        <?php if (!empty($summary['message'])) : ?>
-                            <tr><td><strong>پیام</strong></td><td><?php echo esc_html((string) $summary['message']); ?></td></tr>
-                        <?php endif; ?>
-                    </tbody>
-                </table>
-            <?php else : ?>
-                <p>هنوز سینکی اجرا نشده.</p>
-            <?php endif; ?>
-
-            <h2>راه‌اندازی Cron واقعی سرور (اختیاری، برای سایت‌های کم‌بازدید)</h2>
-            <p>Action Scheduler خودش با بازدید کاربر (Pseudo-Cron وردپرس) اجرا می‌شود؛ اگر سایت بازدید کمی دارد، یک Cron واقعی سرور برای اجرای دستور WP-CLI بگذارید — جزئیات در README پلاگین:</p>
-            <pre style="background:#1e1e1e;color:#fff;padding:12px;max-width:900px;overflow:auto">0 6 * * * cd /path/to/wordpress && wp hci sync --quiet</pre>
+            <p style="margin-top:40px"><a href="#" id="hci-adv-link" style="font-size:11px;color:#a7aaad;text-decoration:none">تنظیمات پیشرفته</a></p>
+            <div id="hci-adv-box" style="display:none;max-width:640px;font-size:12px;color:#50575e">
+                <p>این بخش فقط برای پشتیبان فنی است. جزئیات (زمان دقیق به وقت جهانی، اجرای خودکار با سرور) در فایل README پلاگین آمده است.</p>
+                <p>آخرین نقطه هماهنگی موفق: <?php echo $cursor !== '' ? esc_html($cursor) . ' UTC' : '-'; ?></p>
+                <pre style="background:#f6f7f7;padding:8px;overflow:auto">0 6 * * * cd /path/to/wordpress && wp hci sync --quiet</pre>
+            </div>
+            <script>
+            document.getElementById('hci-adv-link').addEventListener('click', function (e) {
+                e.preventDefault();
+                var box = document.getElementById('hci-adv-box');
+                box.style.display = box.style.display === 'none' ? 'block' : 'none';
+            });
+            </script>
         </div>
         <?php
     }

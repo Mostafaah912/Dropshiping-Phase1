@@ -16,7 +16,7 @@ define('HOUR_IN_SECONDS', 3600);
 define('DAY_IN_SECONDS', 86400);
 define('HMW_VERSION', '1.9.2-test');
 define('HMW_TIMEZONE', 'Asia/Tehran');
-define('HCI_VERSION', '0.4.0-test');
+define('HCI_VERSION', '0.5.0-test');
 
 // ---------------------------------------------------------------------------
 // توابع عمومی WordPress (حداقلی، فقط آنچه فایل‌های production واقعاً صدا می‌زنند)
@@ -242,6 +242,12 @@ function wp_send_json_success($data = null): void {
 function wp_send_json_error($data = null, $status_code = null): void {
     $GLOBALS['__test_last_json_response'] = array('success' => false, 'data' => $data);
     throw new RuntimeException('wp_send_json_error');
+}
+
+function wp_nonce_field($action = -1, $name = '_wpnonce', $referer = true, $echo = true) {
+    $html = '<input type="hidden" name="' . $name . '" value="test-nonce">';
+    if ($echo) { echo $html; }
+    return $html;
 }
 
 function sanitize_text_field(string $s): string {

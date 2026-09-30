@@ -99,24 +99,7 @@ final class HCI_Admin {
                 delete_transient('hci_reset_result_' . get_current_user_id());
                 $reset_result = is_array($reset_result) ? $reset_result : array();
                 ?>
-                <div class="notice notice-success is-dismissible">
-                    <p>
-                        <?php printf(
-                            'ریست انجام شد: %s ردیف جدول، %s مورد در صف (Action Scheduler)، %s کش، %s انتخاب ذخیره‌شده کاربران پاک شد.',
-                            '<strong>' . esc_html((string) ($reset_result['rows_cleared'] ?? 0)) . '</strong>',
-                            '<strong>' . esc_html((string) ($reset_result['queue_cleared'] ?? 0)) . '</strong>',
-                            '<strong>' . esc_html((string) ($reset_result['cache_cleared'] ?? 0)) . '</strong>',
-                            '<strong>' . esc_html((string) ($reset_result['selection_cleared'] ?? 0)) . '</strong>'
-                        ); ?>
-                        <?php if (isset($reset_result['deleted_products'])) : ?>
-                            <br><?php printf(
-                                'همچنین %s محصول و %s تصویر ساخته‌شده توسط این پلاگین حذف شد.',
-                                '<strong>' . esc_html((string) $reset_result['deleted_products']) . '</strong>',
-                                '<strong>' . esc_html((string) $reset_result['deleted_images']) . '</strong>'
-                            ); ?>
-                        <?php endif; ?>
-                    </p>
-                </div>
+                <div class="notice notice-success is-dismissible"><p><?php echo esc_html(self::describe_reset_result($reset_result)); ?></p></div>
                 <script>
                 (function () {
                     // ریست سمت سرور کامل شد؛ انتخاب‌های محلی مرورگر (localStorage
@@ -126,13 +109,13 @@ final class HCI_Admin {
                 })();
                 </script>
             <?php elseif ($notice === 'delete_confirm_mismatch') : ?>
-                <div class="notice notice-error is-dismissible"><p>عبارت تأیید حذف اشتباه بود — هیچ‌چیزی حذف/ریست نشد. دوباره تلاش کنید.</p></div>
+                <div class="notice notice-error is-dismissible"><p>کلمه تأیید را درست ننوشتید، برای همین هیچ‌چیزی پاک نشد. دوباره تلاش کنید.</p></div>
             <?php endif; ?>
 
             <h2 class="nav-tab-wrapper">
                 <a href="<?php echo esc_url(add_query_arg('tab', 'connection', $base_url)); ?>" class="nav-tab <?php echo $tab === 'connection' ? 'nav-tab-active' : ''; ?>">اتصال</a>
                 <a href="<?php echo esc_url(add_query_arg('tab', 'pricing', $base_url)); ?>" class="nav-tab <?php echo $tab === 'pricing' ? 'nav-tab-active' : ''; ?>">قیمت‌گذاری</a>
-                <a href="<?php echo esc_url(add_query_arg('tab', 'reset', $base_url)); ?>" class="nav-tab <?php echo $tab === 'reset' ? 'nav-tab-active' : ''; ?>">ریست داده‌ها</a>
+                <a href="<?php echo esc_url(add_query_arg('tab', 'reset', $base_url)); ?>" class="nav-tab <?php echo $tab === 'reset' ? 'nav-tab-active' : ''; ?>">پاک کردن اطلاعات</a>
             </h2>
 
             <div style="max-width:900px;margin-top:20px">
@@ -274,17 +257,30 @@ final class HCI_Admin {
 
     private const DELETE_CONFIRM_WORD = 'حذف';
 
+    public static function describe_reset_result(array $r): string {
+        $n = static fn ($v): string => HCI_Sync::to_persian_digits((string) (int) $v);
+        $rows = (int) ($r['rows_cleared'] ?? 0);
+        $queued = (int) ($r['queue_cleared'] ?? 0);
+        $parts = array();
+        if ($rows > 0) {
+            $parts[] = $n($rows) . ' محصول ثبت‌شده پاک شد.';
+        } else {
+            $parts[] = 'محصول ثبت‌شده‌ای وجود نداشت که پاک شود.';
+        }
+        if ($queued > 0) {
+            $parts[] = $n($queued) . ' محصولِ در انتظار وارد شدن هم لغو شد.';
+        }
+        if (isset($r['deleted_products'])) {
+            $parts[] = $n($r['deleted_products']) . ' محصول و ' . $n($r['deleted_images'] ?? 0) . ' تصویر از فروشگاه شما حذف شد.';
+        }
+        return implode(' ', $parts);
+    }
+
     private static function render_reset_tab(): void {
         ?>
-        <h2>ریست داده‌ها</h2>
-        <p>این عملیات موارد زیر را کاملاً پاک می‌کند (و در پیام بعد از اجرا، تعداد واقعی هر مورد را نشان می‌دهد):</p>
-        <ul style="list-style:disc;padding-right:20px">
-            <li>جدول ردیابی Import (<code>wp_hci_product_map</code>) — همه رکوردهای Imported/Duplicate/Partial/Error/در صف.</li>
-            <li>صف‌های Action Scheduler این پلاگین — هم Importهای در حال انتظار، هم زمان‌بندی سینک روزانه (که بلافاصله دوباره خودکار زمان‌بندی می‌شود).</li>
-            <li>کش محصولات منبع (صفحه محصولات، شامل هر حالت نیمه‌کاره ناشی از Rate Limit).</li>
-            <li>انتخاب‌های ذخیره‌شده (Transient) همه کارمندان در صفحه محصولات.</li>
-        </ul>
-        <p><strong>توجه:</strong> این کار به‌تنهایی هیچ محصولی را از ووکامرس حذف نمی‌کند — فقط ردیابی/صف/کش این پلاگین پاک می‌شود؛ یعنی بعد از ریست، محصولات قبلاً Import‌شده دیگر به‌عنوان «قبلاً Import‌شده» شناخته نمی‌شوند (Duplicate‌بودن دوباره بررسی می‌شود) و سینک روزانه دیگر آن‌ها را به‌روز نمی‌کند تا دوباره از صفحه محصولات Import شوند. تنظیمات اتصال/قیمت‌گذاری و Cursor سینک دست‌نخورده می‌مانند.</p>
+        <h2>پاک کردن اطلاعات ثبت‌شده در این پلاگین</h2>
+        <p>با این کار، فهرست محصولاتی که این پلاگین برای وارد‌کردن و بروزرسانی ثبت کرده پاک می‌شود، همین‌طور انتخاب‌های نیمه‌کاره و محصولاتی که در انتظار وارد شدن بودند.</p>
+        <p>این کار <strong>خودِ محصولاتی که قبلاً در فروشگاه شما ساخته شده‌اند را حذف نمی‌کند.</strong> فقط یعنی پلاگین دیگر آن‌ها را «قبلاً وارد‌شده» نمی‌شناسد و ممکن است دوباره قابل وارد‌کردن باشند. تنظیمات اتصال و قیمت‌گذاری شما هم دست‌نخورده می‌ماند.</p>
 
         <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" id="hci-reset-form"
             onsubmit="return hciConfirmReset();">
@@ -294,16 +290,16 @@ final class HCI_Admin {
             <div style="border:1px solid #d63638;border-radius:4px;padding:12px;margin:16px 0;max-width:640px">
                 <label>
                     <input type="checkbox" id="hci-delete-products-checkbox" name="delete_products" value="1">
-                    <strong>همچنین محصولات و تصاویری که این پلاگین ساخته را هم حذف کن</strong>
+                    <strong>علاوه بر این، خود محصولاتی را هم که این پلاگین از هی‌مد وارد کرده (و تصاویرشان) حذف کن</strong>
                 </label>
-                <p style="margin:6px 0 0;color:#787c82">فقط محصولاتی که با متای <code>_hci_source_product_id</code> مشخص شده‌اند (یا برای رکوردهای قدیمی، از طریق <code>dest_product_id</code> جدول ردیابی) — هیچ محصول دیگری در سایت هرگز حذف نمی‌شود. پیش‌فرض خاموش است.</p>
+                <p style="margin:6px 0 0;color:#b32d2e"><strong>این کار قابل بازگشت نیست و آن محصولات کاملاً از فروشگاه شما حذف می‌شوند.</strong> محصولات دیگر فروشگاه شما هرگز حذف نمی‌شوند.</p>
                 <p style="margin:10px 0 0">
-                    <label for="hci-delete-confirm-text">برای تأیید، عبارت «<strong><?php echo esc_html(self::DELETE_CONFIRM_WORD); ?></strong>» را اینجا تایپ کنید:</label><br>
+                    <label for="hci-delete-confirm-text">برای تایید، کلمه «<strong><?php echo esc_html(self::DELETE_CONFIRM_WORD); ?></strong>» را در کادر زیر بنویسید.</label><br>
                     <input type="text" id="hci-delete-confirm-text" name="delete_confirm_text" class="regular-text" autocomplete="off">
                 </p>
             </div>
 
-            <button type="submit" class="button button-secondary" style="color:#a00;border-color:#a00">ریست داده‌ها</button>
+            <button type="submit" class="button button-secondary" style="color:#a00;border-color:#a00">پاک کردن اطلاعات</button>
         </form>
         <script>
         function hciConfirmReset() {
@@ -311,12 +307,12 @@ final class HCI_Admin {
             if (deleteChecked) {
                 const confirmText = document.getElementById('hci-delete-confirm-text').value.trim();
                 if (confirmText !== <?php echo wp_json_encode(self::DELETE_CONFIRM_WORD); ?>) {
-                    alert('برای حذف محصولات باید عبارت تأیید را دقیقاً همان‌طور که نوشته شده تایپ کنید.');
+                    alert('برای حذف محصولات، کلمه تأیید را دقیقاً همان‌طور که نوشته شده در کادر بنویسید.');
                     return false;
                 }
-                return confirm('مطمئنید؟ این کار هم داده‌های ردیابی را ریست می‌کند هم محصولات/تصاویر ساخته‌شده توسط این پلاگین را برای همیشه حذف می‌کند — برگشت‌پذیر نیست.');
+                return confirm('مطمئن هستید؟ محصولات وارد‌شده از هی‌مد برای همیشه از فروشگاه شما حذف می‌شوند و بازگشتی ندارد.');
             }
-            return confirm('مطمئنید؟ این کار جدول ردیابی، صف‌های Import/سینک، و کش محصولات را کاملاً پاک می‌کند و برگشت‌پذیر نیست.');
+            return confirm('مطمئن هستید؟ فهرست محصولات ثبت‌شده در این پلاگین پاک می‌شود.');
         }
         </script>
         <?php

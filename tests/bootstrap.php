@@ -16,7 +16,7 @@ define('HOUR_IN_SECONDS', 3600);
 define('DAY_IN_SECONDS', 86400);
 define('HMW_VERSION', '1.9.2-test');
 define('HMW_TIMEZONE', 'Asia/Tehran');
-define('HCI_VERSION', '0.5.0-test');
+define('HCI_VERSION', '0.5.1-test');
 
 // ---------------------------------------------------------------------------
 // توابع عمومی WordPress (حداقلی، فقط آنچه فایل‌های production واقعاً صدا می‌زنند)
@@ -583,6 +583,9 @@ function hci_test_reset_wc_fakes(): void {
     $GLOBALS['__fake_media_sideload_fail_urls'] = array();
     $GLOBALS['__fake_as_single_actions'] = array();
     $GLOBALS['__fake_as_recurring_actions'] = array();
+    $GLOBALS['__fake_wc_synced_parents'] = array();
+    $GLOBALS['__fake_wc_cleared_transients'] = array();
+    $GLOBALS['__fake_wc_variation_save_throws'] = false;
 }
 
 class WC_Product {
@@ -646,6 +649,9 @@ class WC_Product {
     public function get_attributes(): array { return $this->data['attributes']; }
 
     public function save(): int {
+        if ($this->product_type === 'variation' && !empty($GLOBALS['__fake_wc_variation_save_throws'])) {
+            throw new RuntimeException('شبیه‌سازی خطای ساخت تنوع');
+        }
         if ($this->id <= 0) {
             $this->id = $GLOBALS['__fake_wc_next_id']++;
         }
@@ -663,6 +669,14 @@ class WC_Product_Simple extends WC_Product {
 
 class WC_Product_Variable extends WC_Product {
     protected string $product_type = 'variable';
+
+    public static function sync($product_id): void {
+        $GLOBALS['__fake_wc_synced_parents'][] = (int) $product_id;
+    }
+}
+
+function wc_delete_product_transients($id = 0): void {
+    $GLOBALS['__fake_wc_cleared_transients'][] = (int) $id;
 }
 
 class WC_Product_Variation extends WC_Product {

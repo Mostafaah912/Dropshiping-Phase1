@@ -264,6 +264,10 @@ Endpoint سبک برای Polling دوره‌ای: «فقط چه چیزی از ی
 
 کدهای رایج: `invalid_type`, `invalid_stock_status`, `invalid_updated_after`, `invalid_modified_after`, `not_found`, `db_error`.
 
+### موجودی مؤثر Variation (از ۱.۹.۲)
+
+`stock_quantity` یک Variation فقط وقتی عدد است که **خودِ آن Variation** موجودی را مدیریت کند (`manage_stock: true` در ووکامرس مبدا). اگر مدیریت خاموش باشد یا موجودی از والد ارث برده شود (`manage_stock: "parent"`)، `stock_quantity` برابر `null` است (عدد والد به Variation نسبت داده نمی‌شود). `stock_status` همیشه وضعیت «مؤثر» ووکامرس (همان چیزی که به مشتری نشان می‌دهد) است و برای موجود/ناموجود‌بودن تنها مرجع معتبر است. `updated_at` فقط وقتی جلو می‌رود که یکی از فیلدهای مقایسه‌شده — از جمله `stock_status` — واقعاً عوض شده باشد.
+
 ---
 
 ## 8) محدودیت‌های شناخته‌شده (Known Limitations)

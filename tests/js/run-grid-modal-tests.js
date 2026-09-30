@@ -238,4 +238,19 @@ clickRemoveFor(doc, 'https://source.invalid/g2.jpg');
 t.evidence('گالری بعد از حذف هر ۳ تصویر', galleryUrls(doc));
 t.assert(galleryUrls(doc).length === 0, 'هر ۳ تصویر با موفقیت حذف شدند، بدون خطا');
 
+
+t.section('تست ۸ — ستون موجودی تنوع‌ها در مودال');
+const VAR_PRODUCTS = { 888: { id: 888, name: 'متغیر', short_description: '', sku: 'hmp-888', price: null, stock_quantity: null, category_names: [], category_path: [],
+    image_url: null, gallery: [], product_type: 'variable', variations: [
+        { variation_id: 1, attributes: [{ name: 'رنگ', option: '01' }], price: '1', stock_quantity: 7, stock_status: 'instock' },
+        { variation_id: 2, attributes: [{ name: 'رنگ', option: '02' }], price: '1', stock_quantity: null, stock_status: 'instock' },
+        { variation_id: 3, attributes: [{ name: 'رنگ', option: '03' }], price: '1', stock_quantity: null, stock_status: 'outofstock' },
+        { variation_id: 4, attributes: [{ name: 'رنگ', option: '04' }], price: '1', stock_quantity: null },
+    ] } };
+const { document: vdoc } = loadGridScript(VAR_PRODUCTS, [], null, '888');
+vdoc.querySelector('.hci-sell-btn[data-id="888"]').click();
+const stockCells = vdoc.getElementById('hci-modal-variations-tbody').children.map(function (tr) { return tr.children[2].textContent; });
+t.evidence('ستون موجودی', stockCells);
+t.assert(stockCells[0] === '۷ عدد' && stockCells[1] === 'موجود' && stockCells[2] === 'ناموجود' && stockCells[3] === 'نامشخص', 'عدد / موجود / ناموجود / نامشخص (مبدا قدیمی) — هرگز «-»');
+
 t.summary('جمع‌بندی زنجیره مودال «اضافه» ← جدول بازبینی');

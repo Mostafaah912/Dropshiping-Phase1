@@ -245,6 +245,7 @@ final class HCI_Sync {
             foreach ($variation_rows as $vrow) {
                 $variation_row_by_id[(int) $vrow['source_variation_id']] = $vrow;
             }
+            $any_variation_changed = false;
             foreach ((array) $item['variations'] as $variation_item) {
                 $source_variation_id = (int) ($variation_item['variation_id'] ?? 0);
                 $vrow = $variation_row_by_id[$source_variation_id] ?? null;
@@ -257,6 +258,18 @@ final class HCI_Sync {
                     $price_updated += $outcome['price_updated'] ? 1 : 0;
                     $stock_updated += $outcome['stock_updated'] ? 1 : 0;
                     $deactivated += $outcome['deactivated'] ? 1 : 0;
+                    $any_variation_changed = $any_variation_changed || $outcome['price_updated'] || $outcome['stock_updated'] || $outcome['deactivated'];
+                } catch (Throwable $e) {
+                    $errors++;
+                }
+            }
+            // وضعیت والد Variable از روی تنوع‌ها دوباره حساب می‌شود.
+            if ($any_variation_changed && $parent_row) {
+                try {
+                    HCI_Import::refresh_variable_parent(
+                        (int) $parent_row['dest_product_id'],
+                        array_map(static fn (array $r): int => (int) $r['dest_variation_id'], $variation_rows)
+                    );
                 } catch (Throwable $e) {
                     $errors++;
                 }
@@ -350,7 +363,9 @@ final class HCI_Sync {
             }
         }
 
-        if (array_key_exists('stock_quantity', $item)) {
+        // مبدا قدیمی (نه عدد، نه وضعیت): چیزی برای به‌روزرسانی موجودی نداریم.
+        $stock_unknown = ($item['stock_quantity'] ?? null) === null && empty($item['stock_status']);
+        if (array_key_exists('stock_quantity', $item) && !$stock_unknown) {
             // همان قاعده مشترک Import: stock_quantity=NULL یعنی مدیریت
             // موجودی در مبدا خاموش است — manage_stock را روشن نمی‌کند، فقط
             // stock_status خام مبدا را منعکس می‌کند (نه outofstock حدسی).

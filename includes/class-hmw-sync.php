@@ -387,6 +387,13 @@ final class HMW_Sync {
         $variation['name'] = self::variation_name($parent, $variation);
         $variation['permalink'] = $variation['permalink'] ?? ($parent['product_url'] ?? null);
         $parent_category_path = (string) ($parent['category_path'] ?? '');
+        // ووکامرس مبدا در REST برای manage_stock هر Variation یا true/false
+        // برمی‌گرداند یا رشته 'parent' (موجودی از والد ارث برده می‌شود). عدد
+        // موجودی فقط وقتی خودِ Variation موجودی را مدیریت می‌کند معتبر است؛
+        // در حالت 'parent' مقدار stock_quantity در واقع عدد والد است و نباید
+        // به‌عنوان موجودی این Variation ذخیره شود. stock_status ووکامرس همیشه
+        // همان وضعیت «مؤثر» (چیزی که به مشتری نشان می‌دهد) است.
+        $own_stock = ($variation['manage_stock'] ?? false) === true;
 
         $attributes = array();
         if (!empty($variation['attributes']) && is_array($variation['attributes'])) {
@@ -406,9 +413,9 @@ final class HMW_Sync {
             'sku' => ($variation['sku'] ?? '') !== '' ? (string) $variation['sku'] : null,
             'name' => (string) $variation['name'],
             'price' => ($variation['price'] ?? '') !== '' ? (string) $variation['price'] : null,
-            'stock_quantity' => array_key_exists('stock_quantity', $variation) && $variation['stock_quantity'] !== null ? (string) $variation['stock_quantity'] : null,
-            'stock_status' => (string) ($variation['stock_status'] ?? 'outofstock'),
-            'manage_stock' => !empty($variation['manage_stock']) ? 1 : 0,
+            'stock_quantity' => $own_stock && array_key_exists('stock_quantity', $variation) && $variation['stock_quantity'] !== null ? (string) $variation['stock_quantity'] : null,
+            'stock_status' => in_array($variation['stock_status'] ?? '', array('instock', 'outofstock', 'onbackorder'), true) ? (string) $variation['stock_status'] : 'outofstock',
+            'manage_stock' => $own_stock ? 1 : 0,
             'image_url' => self::product_image_url($variation, $parent),
             'product_url' => !empty($variation['permalink']) ? (string) $variation['permalink'] : (string) ($parent['product_url'] ?? ''),
             'category_path' => $parent_category_path,

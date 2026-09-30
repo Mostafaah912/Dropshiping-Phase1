@@ -21,6 +21,7 @@ final class HCI_Import {
         add_action('wp_ajax_hci_queue_batch_import', array(__CLASS__, 'ajax_queue_batch_import'));
         add_action('wp_ajax_hci_poll_import_status', array(__CLASS__, 'ajax_poll_import_status'));
         add_action('wp_ajax_hci_import_next', array(__CLASS__, 'ajax_import_next'));
+        add_action('wp_ajax_hci_repair_variations', array(__CLASS__, 'ajax_repair_variations'));
     }
 
     // =========================================================================
@@ -138,7 +139,7 @@ final class HCI_Import {
                 'variation_id' => (int) ($v['variation_id'] ?? 0),
                 'attributes' => $attrs,
                 'price' => isset($v['price']) && $v['price'] !== null && $v['price'] !== '' ? (string) $v['price'] : null,
-                'stock_quantity' => isset($v['stock_quantity']) && $v['stock_quantity'] !== null ? (float) $v['stock_quantity'] : null,
+                'stock_quantity' => isset($v['stock_quantity']) && $v['stock_quantity'] !== null && $v['stock_quantity'] !== '' ? (float) $v['stock_quantity'] : null,
                 'stock_status' => self::sanitize_stock_status($v['stock_status'] ?? null),
                 'sku' => !empty($v['sku']) ? sanitize_text_field((string) $v['sku']) : null,
             );
@@ -172,7 +173,7 @@ final class HCI_Import {
             'product_type' => $product_type,
             'sku' => !empty($decoded['sku']) ? sanitize_text_field((string) $decoded['sku']) : null,
             'price' => isset($decoded['price']) && $decoded['price'] !== null && $decoded['price'] !== '' ? (string) $decoded['price'] : null,
-            'stock_quantity' => isset($decoded['stock_quantity']) && $decoded['stock_quantity'] !== null ? (float) $decoded['stock_quantity'] : null,
+            'stock_quantity' => isset($decoded['stock_quantity']) && $decoded['stock_quantity'] !== null && $decoded['stock_quantity'] !== '' ? (float) $decoded['stock_quantity'] : null,
             'stock_status' => self::sanitize_stock_status($decoded['stock_status'] ?? null),
             'variations' => $variations,
         );
@@ -343,6 +344,30 @@ final class HCI_Import {
     }
 
     /**
+     * «ترمیم تنوع‌ها»: فقط تنوع‌های ناقص یک محصول Variable که قبلاً وارد شده
+     * دوباره ساخته می‌شود؛ والد و تنوع‌های سالم دست‌نخورده می‌مانند.
+     */
+    public static function repair_variations(int $source_product_id): array {
+        $broken_ids = array_map(static fn (array $r): int => (int) $r['source_product_id'], HCI_DB::get_broken_variable_rows());
+        if (!in_array($source_product_id, $broken_ids, true)) {
+            return array('success' => false, 'message' => 'این محصول نیازی به ترمیم ندارد.');
+        }
+        if (!HCI_DB::requeue_for_repair($source_product_id)) {
+            return array('success' => false, 'message' => 'این محصول همین الان در حال وارد شدن است.');
+        }
+        return array('success' => true, 'message' => 'ترمیم شروع شد.');
+    }
+
+    public static function ajax_repair_variations(): void {
+        if (!current_user_can(self::CAPABILITY)) {
+            wp_send_json_error(array('message' => 'اجازه دسترسی ندارید.'), 403);
+        }
+        check_ajax_referer('hci_repair_variations');
+        $result = self::repair_variations(isset($_POST['source_product_id']) ? (int) $_POST['source_product_id'] : 0);
+        $result['success'] ? wp_send_json_success($result) : wp_send_json_error($result, 400);
+    }
+
+    /**
      * برای کارگر سمت مرورگر: قفل‌های قدیمی (>۵ دقیقه) را آزاد می‌کند، یک
      * ردیف queued را اتمیک Claim می‌کند و بلافاصله همان‌جا (Synchronous)
      * پردازش می‌کند — نه در پس‌زمینه — تا JS بلافاصله نتیجه را برای همان
@@ -447,12 +472,26 @@ final class HCI_Import {
             // همین‌ها را پاک کند، نه هیچ محصول دیگری.
             update_post_meta($parent_id, '_hci_source_product_id', $source_product_id);
 
-            if ($image_error !== null) {
+            // تنوع‌ها (Variation) عمداً *قبل* از هر بازگشت زودهنگام ساخته
+            // می‌شوند: قبلاً اگر دانلود یک تصویر شکست می‌خورد، تابع همین‌جا
+            // برمی‌گشت و هیچ Variationای ساخته نمی‌شد (والد Variable بدون تنوع
+            // و «ناموجود» می‌ماند).
+            $variation_problem = null;
+            if ($product_type === 'variable') {
+                $t_var = microtime(true);
+                $summary = self::save_variations($parent_id, $source_product_id, (array) ($payload['variations'] ?? array()));
+                self::refresh_variable_parent($parent_id, $summary['ids']);
+                self::log_step($source_product_id, 'variations', $t_var, $t0);
+                $variation_problem = self::variation_problem_message($summary);
+            }
+
+            $problem = trim(implode(' ', array_filter(array($image_error, $variation_problem))));
+            if ($problem !== '') {
                 $result = array(
                     'dest_product_id' => $parent_id,
                     'dest_sku' => $dest_sku,
                     'import_status' => HCI_DB::STATUS_PARTIAL,
-                    'error_message' => $image_error,
+                    'error_message' => $problem,
                 );
                 HCI_DB::save_import_result($source_product_id, $result);
                 return $result;
@@ -462,12 +501,6 @@ final class HCI_Import {
             $product = wc_get_product($parent_id);
             $product->set_status($final_status);
             $product->save();
-
-            if ($product_type === 'variable') {
-                $t_var = microtime(true);
-                self::save_variations($parent_id, $source_product_id, (array) ($payload['variations'] ?? array()));
-                self::log_step($source_product_id, 'variations', $t_var, $t0);
-            }
 
             $result = array(
                 'dest_product_id' => $parent_id,
@@ -580,7 +613,7 @@ final class HCI_Import {
             $wc_attribute = new WC_Product_Attribute();
             $wc_attribute->set_id(0);
             $wc_attribute->set_name($name);
-            $wc_attribute->set_options(array_keys($options));
+            $wc_attribute->set_options(array_map('strval', array_keys($options)));
             $wc_attribute->set_visible(true);
             $wc_attribute->set_variation(true);
             $wc_attributes[] = $wc_attribute;
@@ -590,56 +623,127 @@ final class HCI_Import {
         return (int) $product->save();
     }
 
-    private static function save_variations(int $parent_id, int $parent_source_id, array $variations): void {
+    /**
+     * @return array{ids:int[],total:int,failed:int,unknown_stock:int}
+     */
+    private static function save_variations(int $parent_id, int $parent_source_id, array $variations): array {
+        $summary = array('ids' => array(), 'total' => 0, 'failed' => 0, 'unknown_stock' => 0);
+
         foreach ($variations as $variation_payload) {
             $source_variation_id = (int) ($variation_payload['variation_id'] ?? 0);
             if ($source_variation_id <= 0) {
                 continue;
             }
+            $summary['total']++;
 
-            $existing_map = HCI_DB::get_map_row($parent_source_id, $source_variation_id);
-            $dest_variation_id = !empty($existing_map['dest_variation_id']) ? (int) $existing_map['dest_variation_id'] : 0;
+            try {
+                $existing_map = HCI_DB::get_map_row($parent_source_id, $source_variation_id);
+                $dest_variation_id = !empty($existing_map['dest_variation_id']) ? (int) $existing_map['dest_variation_id'] : 0;
+                $existing_product = $dest_variation_id > 0 ? wc_get_product($dest_variation_id) : false;
 
-            $variation_product = $dest_variation_id > 0 ? wc_get_product($dest_variation_id) : false;
-            if (!$variation_product) {
-                $variation_product = new WC_Product_Variation();
-                $variation_product->set_parent_id($parent_id);
-            }
-
-            $attributes_meta = array();
-            foreach ((array) ($variation_payload['attributes'] ?? array()) as $attr) {
-                $name = trim((string) ($attr['name'] ?? ''));
-                if ($name === '') {
+                // ترمیم/Retry: تنوعی که قبلاً کامل ساخته شده دوباره ساخته نمی‌شود.
+                if ($existing_product && ($existing_map['import_status'] ?? '') === HCI_DB::STATUS_IMPORTED) {
+                    $summary['ids'][] = $dest_variation_id;
                     continue;
                 }
-                $attributes_meta[sanitize_title($name)] = trim((string) ($attr['option'] ?? ''));
+
+                $variation_product = $existing_product ?: new WC_Product_Variation();
+                $variation_product->set_parent_id($parent_id);
+                $variation_product->set_status('publish');
+
+                $attributes_meta = array();
+                foreach ((array) ($variation_payload['attributes'] ?? array()) as $attr) {
+                    $name = trim((string) ($attr['name'] ?? ''));
+                    if ($name === '') {
+                        continue;
+                    }
+                    $attributes_meta[sanitize_title($name)] = trim((string) ($attr['option'] ?? ''));
+                }
+                $variation_product->set_attributes($attributes_meta);
+
+                $final_price = self::resolved_price($variation_payload['price'] ?? null);
+                $variation_product->set_regular_price((string) $final_price);
+                $variation_product->set_price((string) $final_price);
+
+                $stock_status = $variation_payload['stock_status'] ?? null;
+                $stock_quantity = $variation_payload['stock_quantity'] ?? null;
+                if ($stock_status === null && ($stock_quantity === null || $stock_quantity === '')) {
+                    // مبدا قدیمی: نه عدد داریم نه وضعیت. instock حدس نمی‌زنیم.
+                    $summary['unknown_stock']++;
+                }
+                self::apply_stock($variation_product, $stock_quantity, $stock_status, false);
+
+                // SKU مشترک Parent هرگز روی Variation کپی نمی‌شود: فقط اگر خودِ
+                // این Variation در منبع SKU مجزا داشت تبدیل و ست می‌شود.
+                $source_variation_sku = $variation_payload['sku'] ?? null;
+                $dest_variation_sku = self::transform_sku($source_variation_sku);
+                if ($dest_variation_sku !== null) {
+                    $variation_product->set_sku($dest_variation_sku);
+                }
+
+                $saved_dest_variation_id = (int) $variation_product->save();
+                if ($saved_dest_variation_id <= 0) {
+                    throw new RuntimeException('variation save returned no id');
+                }
+
+                HCI_DB::upsert_variation_map(
+                    $parent_source_id,
+                    $source_variation_id,
+                    $source_variation_sku,
+                    $saved_dest_variation_id,
+                    $dest_variation_sku,
+                    HCI_DB::STATUS_IMPORTED
+                );
+                $summary['ids'][] = $saved_dest_variation_id;
+            } catch (Throwable $e) {
+                $summary['failed']++;
+                error_log('[HCI Import] variation ' . $source_variation_id . ' failed: ' . $e->getMessage());
             }
-            $variation_product->set_attributes($attributes_meta);
+        }
 
-            $final_price = self::resolved_price($variation_payload['price'] ?? null);
-            $variation_product->set_regular_price((string) $final_price);
-            $variation_product->set_price((string) $final_price);
+        return $summary;
+    }
 
-            self::apply_stock($variation_product, $variation_payload['stock_quantity'] ?? null, $variation_payload['stock_status'] ?? null);
+    /**
+     * پیام ساده فارسی برای مشکل تنوع‌ها (یا null اگر همه‌چیز درست است).
+     */
+    private static function variation_problem_message(array $summary): ?string {
+        if ($summary['total'] === 0 || $summary['failed'] > 0 || count($summary['ids']) < $summary['total']) {
+            return 'تنوع‌های محصول ساخته نشد.';
+        }
+        if ($summary['unknown_stock'] > 0) {
+            return 'موجودی تنوع‌های این محصول از هی‌مد مشخص نیست؛ لازم است پشتیبانی یک همگام‌سازی کامل در هی‌مد انجام دهد.';
+        }
+        return null;
+    }
 
-            // SKU مشترک Parent هرگز روی Variation کپی نمی‌شود: فقط اگر خودِ
-            // این Variation در منبع SKU مجزا داشت تبدیل و ست می‌شود.
-            $source_variation_sku = $variation_payload['sku'] ?? null;
-            $dest_variation_sku = self::transform_sku($source_variation_sku);
-            if ($dest_variation_sku !== null) {
-                $variation_product->set_sku($dest_variation_sku);
+    /**
+     * والد Variable موجودی خودش را مدیریت نمی‌کند؛ وضعیتش از روی تنوع‌ها
+     * حساب می‌شود (حداقل یک تنوع موجود ⇒ والد موجود). سپس Sync خودِ
+     * ووکامرس و پاک‌کردن کش‌های محصول هم صدا زده می‌شود.
+     */
+    public static function refresh_variable_parent(int $parent_id, array $variation_dest_ids): void {
+        $parent = wc_get_product($parent_id);
+        if (!$parent) {
+            return;
+        }
+        $any_in_stock = false;
+        foreach ($variation_dest_ids as $vid) {
+            $v = wc_get_product((int) $vid);
+            if ($v && in_array($v->get_stock_status(), array('instock', 'onbackorder'), true)) {
+                $any_in_stock = true;
+                break;
             }
+        }
+        $parent->set_manage_stock(false);
+        $parent->set_stock_status($any_in_stock ? 'instock' : 'outofstock');
+        $parent->save();
 
-            $saved_dest_variation_id = (int) $variation_product->save();
-
-            HCI_DB::upsert_variation_map(
-                $parent_source_id,
-                $source_variation_id,
-                $source_variation_sku,
-                $saved_dest_variation_id,
-                $dest_variation_sku,
-                HCI_DB::STATUS_IMPORTED
-            );
+        if (class_exists('WC_Product_Variable') && method_exists('WC_Product_Variable', 'sync')) {
+            WC_Product_Variable::sync($parent_id);
+        }
+        if (function_exists('wc_delete_product_transients')) {
+            wc_delete_product_transients($parent_id);
         }
     }
 
@@ -666,7 +770,7 @@ final class HCI_Import {
      * خروجی bool: آیا واقعاً چیزی روی محصول تغییر کرد (برای شمارنده
      * stock_updated در HCI_Sync لازم است؛ Import آن را نادیده می‌گیرد).
      */
-    public static function apply_stock(WC_Product $product, $stock_quantity, ?string $stock_status): bool {
+    public static function apply_stock(WC_Product $product, $stock_quantity, ?string $stock_status, bool $unknown_is_instock = true): bool {
         $changed = false;
 
         if ($stock_quantity !== null && $stock_quantity !== '') {
@@ -691,7 +795,7 @@ final class HCI_Import {
         // پس اصلاً manage_stock را روشن نمی‌کنیم و فقط وضعیت خام مبدا را
         // منتقل می‌کنیم (پیش‌فرض instock فقط اگر خودِ مبدا هم چیزی نگفته).
         $allowed_statuses = array('instock', 'outofstock', 'onbackorder');
-        $resolved_status = in_array($stock_status, $allowed_statuses, true) ? $stock_status : 'instock';
+        $resolved_status = in_array($stock_status, $allowed_statuses, true) ? $stock_status : ($unknown_is_instock ? 'instock' : 'outofstock');
 
         if ($product->get_manage_stock()) {
             $product->set_manage_stock(false);

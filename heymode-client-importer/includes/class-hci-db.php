@@ -79,14 +79,14 @@ final class HCI_DB {
         $table = self::product_map_table();
         if ($source_sku !== null && $source_sku !== '') {
             $row = $wpdb->get_row($wpdb->prepare(
-                "SELECT * FROM {$table} WHERE id != %d AND import_status = 'imported' AND (source_product_id = %d OR source_sku = %s) LIMIT 1",
+                "SELECT * FROM {$table} WHERE id != %d AND source_variation_id IS NULL AND import_status = 'imported' AND (source_product_id = %d OR source_sku = %s) LIMIT 1",
                 $exclude_row_id,
                 $source_product_id,
                 $source_sku
             ), ARRAY_A);
         } else {
             $row = $wpdb->get_row($wpdb->prepare(
-                "SELECT * FROM {$table} WHERE id != %d AND import_status = 'imported' AND source_product_id = %d LIMIT 1",
+                "SELECT * FROM {$table} WHERE id != %d AND source_variation_id IS NULL AND import_status = 'imported' AND source_product_id = %d LIMIT 1",
                 $exclude_row_id,
                 $source_product_id
             ), ARRAY_A);
@@ -426,5 +426,53 @@ final class HCI_DB {
             'SELECT DISTINCT dest_product_id FROM ' . self::product_map_table() . ' WHERE dest_product_id IS NOT NULL'
         );
         return array_values(array_map('intval', is_array($rows) ? $rows : array()));
+    }
+
+    /**
+     * محصولات Variable که «وارد شده» ثبت شده‌اند ولی همه تنوع‌هایشان ساخته
+     * نشده (مثلاً Importهای قدیمی‌تر). فقط ردیف‌هایی که Snapshot تنوع‌ها هنوز
+     * در import_payload هست قابل ترمیم‌اند.
+     */
+    public static function get_broken_variable_rows(): array {
+        $broken = array();
+        foreach (self::get_imported_parent_rows() as $row) {
+            $payload = json_decode((string) ($row['import_payload'] ?? ''), true);
+            if (!is_array($payload) || ($payload['product_type'] ?? '') !== 'variable') {
+                continue;
+            }
+            $wanted = 0;
+            foreach ((array) ($payload['variations'] ?? array()) as $v) {
+                if ((int) ($v['variation_id'] ?? 0) > 0) {
+                    $wanted++;
+                }
+            }
+            if ($wanted === 0) {
+                continue;
+            }
+            $have = count(self::get_imported_variation_rows_for_parents(array((int) $row['source_product_id']))[(int) $row['source_product_id']] ?? array());
+            if ($have < $wanted) {
+                $row['payload_name'] = (string) ($payload['name'] ?? '');
+                $broken[] = $row;
+            }
+        }
+        return $broken;
+    }
+
+    /**
+     * ردیف را برای ترمیم دوباره «در صف» می‌گذارد (dest_product_id حفظ می‌شود
+     * تا والد دوباره ساخته نشود).
+     */
+    public static function requeue_for_repair(int $source_product_id): bool {
+        global $wpdb;
+        $row = self::get_map_row($source_product_id);
+        if (!$row || $row['import_status'] === self::STATUS_QUEUED || $row['import_status'] === self::STATUS_PROCESSING) {
+            return false;
+        }
+        $wpdb->update(
+            self::product_map_table(),
+            array('import_status' => self::STATUS_QUEUED, 'error_message' => null, 'updated_at' => current_time('mysql', true)),
+            array('id' => (int) $row['id'])
+        );
+        return true;
     }
 }

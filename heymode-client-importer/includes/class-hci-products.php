@@ -601,6 +601,18 @@ final class HCI_Products {
                 });
             }
 
+            // موجودی هر تنوع: عدد، «موجود»، «ناموجود»، یا «نامشخص» (مبدا قدیمی)
+            function variationStockText(v) {
+                const q = v.stock_quantity;
+                if (q !== null && q !== undefined && q !== '') {
+                    return Number(q).toLocaleString('fa-IR') + ' عدد';
+                }
+                if (v.stock_status === 'instock') return 'موجود';
+                if (v.stock_status === 'outofstock') return 'ناموجود';
+                if (v.stock_status === 'onbackorder') return 'پیش‌سفارش';
+                return 'نامشخص';
+            }
+
             function renderVariations(product) {
                 const row = document.getElementById('hci-modal-variations-row');
                 const tbody = document.getElementById('hci-modal-variations-tbody');
@@ -626,7 +638,7 @@ final class HCI_Products {
                     tdPrice.textContent = (v.price !== null && v.price !== undefined && v.price !== '') ? v.price : '-';
 
                     const tdStock = document.createElement('td');
-                    tdStock.textContent = (v.stock_quantity !== null && v.stock_quantity !== undefined) ? v.stock_quantity : '-';
+                    tdStock.textContent = variationStockText(v);
 
                     tr.appendChild(tdAttr);
                     tr.appendChild(tdPrice);
@@ -768,6 +780,22 @@ final class HCI_Products {
      * ریز قیمت هر Variation را در 'title' (Tooltip بومی مرورگر، بدون نیاز به
      * JS اضافه) می‌گذارد — کم‌هزینه‌ترین راه سازگار با ساختار فعلی جدول.
      */
+    public static function variation_stock_text(array $variation): string {
+        $q = $variation['stock_quantity'] ?? null;
+        if ($q !== null && $q !== '') {
+            return HCI_Sync::to_persian_digits((string) (float) $q) . ' عدد';
+        }
+        switch ($variation['stock_status'] ?? '') {
+            case 'instock':
+                return 'موجود';
+            case 'outofstock':
+                return 'ناموجود';
+            case 'onbackorder':
+                return 'پیش‌سفارش';
+        }
+        return 'نامشخص';
+    }
+
     private static function compute_price_display(array $entry): array {
         $is_variable = ($entry['product_type'] ?? 'simple') === 'variable';
         $variations = (array) ($entry['variations'] ?? array());
@@ -787,7 +815,7 @@ final class HCI_Products {
                     (array) ($variation['attributes'] ?? array())
                 ));
                 $label = $attr_text !== '' ? $attr_text : ('Variation #' . (int) ($variation['variation_id'] ?? 0));
-                $tooltip_lines[] = $label . ' = ' . number_format($final, 0);
+                $tooltip_lines[] = $label . ' = ' . number_format($final, 0) . ' — ' . self::variation_stock_text((array) $variation);
             }
 
             if ($final_prices) {
@@ -812,11 +840,63 @@ final class HCI_Products {
         );
     }
 
+    /**
+     * محصولات متغیری که «وارد شده» ولی تنوع‌هایشان ناقص است، با دکمه ترمیم.
+     */
+    private static function render_repair_box(): void {
+        $broken = HCI_DB::get_broken_variable_rows();
+        if (!$broken) {
+            return;
+        }
+        ?>
+        <div class="notice notice-warning inline" style="max-width:900px">
+            <p><strong>این محصولات وارد شده‌اند ولی رنگ/سایزهایشان (تنوع‌ها) کامل ساخته نشده است:</strong></p>
+            <ul>
+                <?php foreach ($broken as $row) : ?>
+                    <li>
+                        <?php echo esc_html((string) ($row['payload_name'] ?? ('محصول ' . $row['source_product_id']))); ?>
+                        <button type="button" class="button hci-repair-btn" data-id="<?php echo esc_attr((string) $row['source_product_id']); ?>" style="margin-right:8px">ترمیم تنوع‌ها</button>
+                    </li>
+                <?php endforeach; ?>
+            </ul>
+        </div>
+        <script>
+        (function () {
+            const ajaxUrl = <?php echo wp_json_encode(admin_url('admin-ajax.php')); ?>;
+            const repairNonce = <?php echo wp_json_encode(wp_create_nonce('hci_repair_variations')); ?>;
+            const nextNonce = <?php echo wp_json_encode(wp_create_nonce('hci_import_next')); ?>;
+            function post(params) {
+                return fetch(ajaxUrl, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams(params).toString() }).then(function (r) { return r.json(); });
+            }
+            function drain() {
+                return post({ action: 'hci_import_next', _ajax_nonce: nextNonce }).then(function (d) {
+                    if (d && d.success && d.data && !d.data.done) { return drain(); }
+                });
+            }
+            document.querySelectorAll('.hci-repair-btn').forEach(function (btn) {
+                btn.addEventListener('click', function () {
+                    btn.disabled = true;
+                    btn.textContent = 'در حال ترمیم...';
+                    post({ action: 'hci_repair_variations', _ajax_nonce: repairNonce, source_product_id: btn.getAttribute('data-id') })
+                        .then(function (d) {
+                            if (!d || !d.success) { throw new Error('fail'); }
+                            return drain();
+                        })
+                        .then(function () { location.reload(); })
+                        .catch(function () { btn.disabled = false; btn.textContent = 'ترمیم تنوع‌ها'; alert('ترمیم انجام نشد. دوباره تلاش کنید.'); });
+                });
+            });
+        })();
+        </script>
+        <?php
+    }
+
     public static function render_review_page(): void {
         self::guard();
 
         $selection = get_transient(self::selection_key());
         echo '<div class="wrap"><h1>بازبینی و Import</h1>';
+        self::render_repair_box();
 
         if (!is_array($selection) || !$selection) {
             echo '<p>چیزی برای بازبینی انتخاب نشده. <a href="' . esc_url(admin_url('admin.php?page=heymode-client-importer-products')) . '">بازگشت به محصولات</a></p></div>';

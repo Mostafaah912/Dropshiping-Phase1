@@ -935,6 +935,20 @@ final class HCI_Products {
                     $source_sku = (string) ($entry['sku'] ?? '');
                     $status_row = $statuses[$source_product_id] ?? null;
                     $status = $status_row['import_status'] ?? null;
+                    $status_message = (string) ($status_row['error_message'] ?? '');
+                    $is_duplicate = false;
+                    if (!in_array($status, array(HCI_DB::STATUS_IMPORTED, HCI_DB::STATUS_QUEUED, HCI_DB::STATUS_PROCESSING), true)) {
+                        // پیش‌بررسی تکراری‌بودن همین الان (نه بعد از صف‌بندی).
+                        $duplicate_message = HCI_Import::duplicate_reason($source_product_id, $source_sku !== '' ? $source_sku : null);
+                        if ($duplicate_message !== null) {
+                            $is_duplicate = true;
+                            $status = HCI_DB::STATUS_DUPLICATE;
+                            $status_message = $duplicate_message;
+                        } elseif ($status === HCI_DB::STATUS_DUPLICATE) {
+                            $status = null; // مانع قبلی برطرف شده
+                            $status_message = '';
+                        }
+                    }
                     $is_blocked = in_array($status, array(HCI_DB::STATUS_QUEUED, HCI_DB::STATUS_PROCESSING), true);
                     $price_display = self::compute_price_display($entry);
 
@@ -964,11 +978,13 @@ final class HCI_Products {
                         </td>
                         <td><textarea class="hci-review-desc" rows="2" dir="ltr" style="width:100%;text-align:left"><?php echo esc_textarea((string) ($entry['short_description'] ?? '')); ?></textarea></td>
                         <td class="hci-status-cell" data-id="<?php echo esc_attr((string) $source_product_id); ?>">
-                            <?php echo self::render_status_badge($status, $status_row['error_message'] ?? ''); ?>
+                            <?php echo self::render_status_badge($status, $status_message); ?>
                         </td>
                         <td>
                             <?php if ($is_blocked) : ?>
                                 <button type="button" class="button" disabled>در حال وارد شدن…</button>
+                            <?php elseif ($is_duplicate) : ?>
+                                <button type="button" class="button" disabled>قابل وارد کردن نیست</button>
                             <?php else : ?>
                                 <button type="button" class="button hci-import-btn" data-id="<?php echo esc_attr((string) $source_product_id); ?>">
                                     <?php echo in_array($status, array(HCI_DB::STATUS_ERROR, HCI_DB::STATUS_PARTIAL), true) ? 'تلاش مجدد' : 'وارد کن'; ?>

@@ -129,6 +129,12 @@ final class HCI_Import {
         // محصولی که مشتری قبلاً پاکش کرده، از صفر و با محصول تازه ساخته می‌شود.
         HCI_DB::forget_removed($source_product_id);
 
+        // تکراری‌بودن همان لحظه رد می‌شود، نه بعد از ورود به صف.
+        $duplicate_message = self::duplicate_reason($source_product_id, $source_sku ?? ($decoded['sku'] ?? null));
+        if ($duplicate_message !== null) {
+            return array('success' => false, 'message' => $duplicate_message, 'duplicate' => true);
+        }
+
         $sanitized = self::sanitize_payload($decoded);
         $queue = HCI_DB::queue_import($source_product_id, $source_sku, (string) wp_json_encode($sanitized, JSON_UNESCAPED_UNICODE));
         if (!$queue['success']) {
@@ -232,17 +238,34 @@ final class HCI_Import {
     public static function check_duplicate(int $current_row_id, int $source_product_id, ?string $source_sku, ?string $dest_sku, int $existing_dest_id): ?string {
         $other = HCI_DB::find_other_imported_row($current_row_id, $source_product_id, $source_sku);
         if ($other) {
-            return 'این محصول (یا SKU آن) قبلاً با شناسه محصول مقصد #' . (int) ($other['dest_product_id'] ?? 0) . ' Import شده است.';
+            return 'این محصول قبلاً وارد فروشگاه شما شده است.';
         }
 
         if ($dest_sku !== null && function_exists('wc_get_product_id_by_sku')) {
             $external_id = (int) wc_get_product_id_by_sku($dest_sku);
             if ($external_id > 0 && $external_id !== $existing_dest_id) {
-                return 'یک محصول با SKU مقصد "' . $dest_sku . '" از قبل در ووکامرس وجود دارد (شناسه #' . $external_id . ') که توسط این پلاگین ساخته نشده.';
+                return 'محصولی با همین کد (SKU) از قبل در فروشگاه شما هست و با این محصول یکی نیست.';
             }
         }
 
         return null;
+    }
+
+    /**
+     * پیش‌بررسی تکراری‌بودن برای صفحه بازبینی و صف‌بندی (همان سه لایه
+     * check_duplicate). null یعنی تکراری نیست. ردیف خودِ محصول (تلاش مجدد
+     * ناقص/خطادار) تکراری حساب نمی‌شود.
+     */
+    public static function duplicate_reason(int $source_product_id, ?string $source_sku): ?string {
+        $row = HCI_DB::get_map_row($source_product_id);
+        $dest_sku = self::transform_sku($source_sku);
+        return self::check_duplicate(
+            (int) ($row['id'] ?? 0),
+            $source_product_id,
+            $source_sku,
+            $dest_sku,
+            !empty($row['dest_product_id']) ? (int) $row['dest_product_id'] : 0
+        );
     }
 
     /**
@@ -251,7 +274,8 @@ final class HCI_Import {
      * ساخته/جست‌وجو نمی‌شود و محصول دسته پیش‌فرض ووکامرس را می‌گیرد.
      */
     public static function should_apply_categories(): bool {
-        return (bool) get_option('hci_apply_categories', true);
+        // '0' (یا مقدار خالیِ نسخه‌های قبلی) = خاموش؛ گزینه‌ی ساخته‌نشده = روشن.
+        return !in_array((string) get_option('hci_apply_categories', '1'), array('0', ''), true);
     }
 
     /**
@@ -676,7 +700,14 @@ final class HCI_Import {
      * مرحله و مدت جمعی از لحظه Claim را در لاگ خطای وردپرس ثبت می‌کند.
      * هرگز رفتار Import را تغییر نمی‌دهد و هرگز استثنا پرتاب نمی‌کند.
      */
+    private static function debug_logging_enabled(): bool {
+        return (defined('WP_DEBUG') && WP_DEBUG) || (string) get_option('hci_debug_log', '') === '1';
+    }
+
     private static function log_step(int $source_product_id, string $step, float $step_started_at, float $overall_started_at): void {
+        if (!self::debug_logging_enabled()) {
+            return;
+        }
         $step_ms = round((microtime(true) - $step_started_at) * 1000, 1);
         $total_ms = round((microtime(true) - $overall_started_at) * 1000, 1);
         error_log(sprintf('[HCI Import] product=%d step=%s step_ms=%s total_ms=%s', $source_product_id, $step, $step_ms, $total_ms));

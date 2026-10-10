@@ -29,6 +29,11 @@ function get_option(string $name, $default = false) {
 }
 
 function update_option(string $name, $value, $autoload = null): bool {
+    // مثل وردپرس واقعی: اگر مقدار جدید با مقدار فعلی (برای گزینه‌ی ساخته‌نشده: false) یکی باشد، چیزی ذخیره نمی‌شود.
+    $old = $GLOBALS['__test_options'][$name] ?? false;
+    if ($value === $old) {
+        return false;
+    }
     $GLOBALS['__test_options'][$name] = $value;
     return true;
 }

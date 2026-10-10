@@ -477,13 +477,22 @@ final class HCI_Admin {
 
     public static function handle_save_pricing(): void {
         self::guard('hci_save_pricing');
-        $fixed_amount = isset($_POST['fixed_amount']) ? (float) $_POST['fixed_amount'] : 0.0;
-        $percent = isset($_POST['percent']) ? (float) $_POST['percent'] : 0.0;
-        $default_status = isset($_POST['default_status']) ? sanitize_key(wp_unslash($_POST['default_status'])) : 'draft';
-        HCI_Pricing::save($fixed_amount, $percent, $default_status);
-        update_option('hci_apply_categories', !empty($_POST['apply_categories']), false);
+        self::save_pricing_settings($_POST);
         wp_safe_redirect(add_query_arg(array('page' => 'heymode-client-importer', 'tab' => 'pricing', 'hci_notice' => 'pricing_saved'), admin_url('admin.php')));
         exit;
+    }
+
+    /**
+     * ذخیره تنظیمات قیمت‌گذاری/دسته‌بندی از داده‌ی ارسالی فرم. گزینه دسته‌بندی
+     * همیشه '0' یا '1' ذخیره می‌شود (update_option با false روی گزینه‌ی
+     * ساخته‌نشده در وردپرس بی‌اثر است).
+     */
+    public static function save_pricing_settings(array $post): void {
+        $fixed_amount = isset($post['fixed_amount']) ? (float) $post['fixed_amount'] : 0.0;
+        $percent = isset($post['percent']) ? (float) $post['percent'] : 0.0;
+        $default_status = isset($post['default_status']) ? sanitize_key(wp_unslash((string) $post['default_status'])) : 'draft';
+        HCI_Pricing::save($fixed_amount, $percent, $default_status);
+        update_option('hci_apply_categories', !empty($post['apply_categories']) ? '1' : '0', false);
     }
 
     private static function guard(string $nonce_action): void {

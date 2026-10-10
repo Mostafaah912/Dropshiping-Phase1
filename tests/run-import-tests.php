@@ -41,7 +41,7 @@ $row1Id = (int) $row1['id'];
 
 $dup1 = HCI_Import::check_duplicate(999999, 100, null, null, 0);
 test_evidence('لایه ۱ — همان source_product_id، رکورد دیگری imported است', $dup1);
-test_assert($dup1 !== null && str_contains($dup1, '5000'), 'لایه ۱: source_product_id تکراری با رکورد دیگر تشخیص داده می‌شود');
+test_assert($dup1 !== null && str_contains($dup1, 'قبلاً وارد'), 'لایه ۱: source_product_id تکراری با رکورد دیگر تشخیص داده می‌شود');
 
 $dupSelf = HCI_Import::check_duplicate($row1Id, 100, 'SKU-A', 'vsp-100', 5000);
 test_assert($dupSelf === null, 'بررسی خودِ همان ردیف (id واقعی‌اش Exclude شده) هرگز Duplicate خودش تلقی نمی‌شود — این دقیقاً همان سناریوی Retry است');
@@ -53,7 +53,7 @@ test_assert($dup2 !== null, 'لایه ۲: source_sku تکراری با محصو�
 $GLOBALS['__fake_wc_sku_index']['vsp-999'] = 7777; // شبیه‌سازی یک محصول واقعی ساخته‌شده خارج از این پلاگین
 $dup3 = HCI_Import::check_duplicate(999999, 400, null, 'vsp-999', 0);
 test_evidence('لایه ۳ — SKU مقصد از قبل روی یک محصول واقعی ووکامرس هست (خارج از جدول ردیابی)', $dup3);
-test_assert($dup3 !== null && str_contains($dup3, '7777'), 'لایه ۳: wc_get_product_id_by_sku تداخل خارجی را تشخیص می‌دهد');
+test_assert($dup3 !== null && str_contains($dup3, 'همین کد'), 'لایه ۳: wc_get_product_id_by_sku تداخل خارجی را تشخیص می‌دهد');
 
 $dup3Retry = HCI_Import::check_duplicate(999999, 400, null, 'vsp-999', 7777);
 test_assert($dup3Retry === null, 'لایه ۳ در حالت Retry: اگر SKU مقصد متعلق به همان dest_product_id فعلی خودمان باشد (تلاش قبلی)، Duplicate تشخیص داده نمی‌شود');
@@ -300,7 +300,7 @@ hci_test_reset_wc_fakes();
 $wpdb7 = hci_test_create_product_map_db();
 $GLOBALS['wpdb'] = $wpdb7;
 HCI_Pricing::save(0.0, 0.0, 'publish');
-update_option('hci_apply_categories', false, false);
+update_option('hci_apply_categories', '0', false);
 
 $noCateoryPayload = array(
     'name' => 'محصول بدون دسته اجباری',
@@ -323,7 +323,7 @@ test_assert(empty($GLOBALS['__fake_wc_terms']['product_cat']), 'هیچ Term دس
 $product7 = wc_get_product((int) $row7['dest_product_id']);
 test_assert($product7->get_category_ids() === array(), 'category_ids محصول خالی مانده — یعنی دسته پیش‌فرض ووکامرس (Uncategorized) را می‌گیرد');
 
-update_option('hci_apply_categories', true, false);
+update_option('hci_apply_categories', '1', false);
 
 echo "\n=== جمع‌بندی Import Engine ===\n";
 echo "PASS: {$GLOBALS['__test_passes']}\n";

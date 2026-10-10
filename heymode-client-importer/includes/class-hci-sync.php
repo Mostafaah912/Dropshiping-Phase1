@@ -5,6 +5,10 @@ defined('ABSPATH') || exit;
 final class HCI_Sync {
     private const CAPABILITY = 'manage_woocommerce';
     public const DAILY_HOOK = 'hci_daily_sync_run';
+    // نوبت ساعت ۰۶:۰۰ تهران. جدا از DAILY_HOOK (Retry/دستی) است تا هر اجرا
+    // نوبت بعد را دقیقاً روی ۰۶:۰۰ فردا بگذارد و با تأخیر Pseudo-Cron نلغزد.
+    public const SLOT_HOOK = 'hci_daily_sync_slot';
+    private const SCHEDULE_VERSION_OPTION = 'hci_sync_schedule_version';
     private const GROUP = 'hci-sync';
     private const CURSOR_OPTION = 'hci_sync_cursor_gmt';
     private const RETRY_COUNT_OPTION = 'hci_sync_retry_count';
@@ -14,24 +18,54 @@ final class HCI_Sync {
     public static function init(): void {
         add_action('init', array(__CLASS__, 'ensure_scheduled'));
         add_action(self::DAILY_HOOK, array(__CLASS__, 'run_daily_sync'));
+        add_action(self::SLOT_HOOK, array(__CLASS__, 'run_scheduled_slot'));
         add_action('admin_menu', array(__CLASS__, 'admin_menu'), 20);
         add_action('admin_post_hci_sync_now', array(__CLASS__, 'handle_sync_now'));
     }
 
-    public static function ensure_scheduled(): void {
-        if (!function_exists('as_schedule_recurring_action') || !function_exists('as_next_scheduled_action')) {
-            return;
-        }
-        if (as_next_scheduled_action(self::DAILY_HOOK, array(), self::GROUP)) {
-            return;
-        }
+    /**
+     * نزدیک‌ترین ۰۶:۰۰ تهران که کاملاً بعد از $now باشد.
+     */
+    public static function next_slot_timestamp(?int $now = null): int {
         $tz = new DateTimeZone(self::TIMEZONE);
-        $now = new DateTimeImmutable('now', $tz);
-        $next = $now->setTime(6, 0, 0);
-        if ($next <= $now) {
-            $next = $next->modify('+1 day');
+        $current = (new DateTimeImmutable('@' . ($now ?? time())))->setTimezone($tz);
+        $next = $current->setTime(6, 0, 0);
+        if ($next <= $current) {
+            $next = $next->modify('+1 day')->setTime(6, 0, 0);
         }
-        as_schedule_recurring_action($next->getTimestamp(), DAY_IN_SECONDS, self::DAILY_HOOK, array(), self::GROUP);
+        return $next->getTimestamp();
+    }
+
+    public static function ensure_scheduled(): void {
+        if (!function_exists('as_schedule_single_action') || !function_exists('as_next_scheduled_action')) {
+            return;
+        }
+        // نصب‌های قبلی یک زمان‌بندی تکرارشونده روی DAILY_HOOK دارند که نوبت بعد
+        // را از زمان اجرای واقعی می‌سازد و می‌لغزد؛ یک‌بار پاکش می‌کنیم.
+        if ((int) get_option(self::SCHEDULE_VERSION_OPTION, 1) < 2) {
+            if (function_exists('as_unschedule_all_actions')) {
+                as_unschedule_all_actions(self::DAILY_HOOK);
+            }
+            update_option(self::SCHEDULE_VERSION_OPTION, 2, false);
+        }
+        if (as_next_scheduled_action(self::SLOT_HOOK, array(), self::GROUP)) {
+            return;
+        }
+        as_schedule_single_action(self::next_slot_timestamp(), self::SLOT_HOOK, array(), self::GROUP);
+    }
+
+    /**
+     * اجرای نوبت ۰۶:۰۰: اول نوبت بعدی را روی ۰۶:۰۰ فردا می‌گذارد (تا حتی اگر
+     * اجرا وسط کار قطع شد زنجیره نشکند)، شمارنده Retry را برای امروز صفر
+     * می‌کند و بعد سینک را اجرا می‌کند.
+     */
+    public static function run_scheduled_slot(?int $now = null): array {
+        if (function_exists('as_schedule_single_action') && function_exists('as_next_scheduled_action')
+            && !as_next_scheduled_action(self::SLOT_HOOK, array(), self::GROUP)) {
+            as_schedule_single_action(self::next_slot_timestamp($now), self::SLOT_HOOK, array(), self::GROUP);
+        }
+        update_option(self::RETRY_COUNT_OPTION, 0, false);
+        return self::run_daily_sync(false);
     }
 
     public static function admin_menu(): void {
@@ -117,7 +151,7 @@ final class HCI_Sync {
         $notice = isset($_GET['hci_notice']) ? sanitize_key(wp_unslash($_GET['hci_notice'])) : '';
         $cursor = (string) get_option(self::CURSOR_OPTION, '');
         $summary = get_option(self::SUMMARY_OPTION, null);
-        $next_run = function_exists('as_next_scheduled_action') ? as_next_scheduled_action(self::DAILY_HOOK, array(), self::GROUP) : false;
+        $next_run = function_exists('as_next_scheduled_action') ? as_next_scheduled_action(self::SLOT_HOOK, array(), self::GROUP) : false;
         $last_ts = $cursor !== '' ? strtotime($cursor . ' UTC') : false;
         $imported_count = count(HCI_DB::get_imported_parent_rows());
         ?>
@@ -194,7 +228,10 @@ final class HCI_Sync {
         $result = HCI_Source_Client::get_delta_products($cursor);
 
         if (!$result['success']) {
-            self::schedule_retry();
+            // Sync Now دستی از سهمیه Retry روزانه مصرف نمی‌کند.
+            if (!$manual) {
+                self::schedule_retry();
+            }
             return self::finish(array(
                 'started_at' => $request_started_at,
                 'manual' => $manual,
@@ -276,7 +313,12 @@ final class HCI_Sync {
             }
         }
 
-        update_option(self::CURSOR_OPTION, $request_started_at, false);
+        // Cursor فقط وقتی جلو می‌رود که هیچ محصولی خطا نداده باشد؛ وگرنه
+        // محصول خطادار دور بعد دوباره در Delta می‌آید (همان‌طور که پیام صفحه
+        // می‌گوید «دوباره امتحان می‌شود»). اعمال دوباره بدون تغییر، بی‌ضرر است.
+        if ($errors === 0) {
+            update_option(self::CURSOR_OPTION, $request_started_at, false);
+        }
 
         return self::finish(array(
             'started_at' => $request_started_at,

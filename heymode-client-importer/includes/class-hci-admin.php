@@ -337,6 +337,7 @@ final class HCI_Admin {
             // بلافاصله در اجرای بعدی init() دوباره خودش را می‌سازد.
             as_unschedule_all_actions(HCI_Import::ACTION_HOOK);
             as_unschedule_all_actions(HCI_Sync::DAILY_HOOK);
+            as_unschedule_all_actions(HCI_Sync::SLOT_HOOK);
         }
         HCI_Sync::reset_retry_state();
 

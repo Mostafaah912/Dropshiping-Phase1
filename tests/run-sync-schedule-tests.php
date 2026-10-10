@@ -7,6 +7,7 @@ require_once __DIR__ . '/bootstrap.php';
 echo "HeyMode Client Importer — زمان‌بندی و Cursor/Retry سینک (S1-02، S1-03، S1-04) (PHP " . PHP_VERSION . ")\n";
 
 HCI_Source_Client::configure_delays_for_tests(0, 0);
+$GLOBALS['__stub_auto_health'] = true;
 
 function hci_sched_reset(): Fake_WPDB {
     hci_test_reset_wc_fakes();
@@ -53,7 +54,7 @@ test_assert(count($slots) === 1 && count($GLOBALS['__fake_as_recurring_actions']
 test_assert((int) $slots[0]['timestamp'] % 60 === 0 && (new DateTimeImmutable('@' . $slots[0]['timestamp']))->setTimezone(new DateTimeZone('Asia/Tehran'))->format('H:i') === '06:00', 'نوبت ساخته‌شده ساعت ۰۶:۰۰ تهران است');
 
 HCI_Sync::ensure_scheduled();
-test_assert(count($GLOBALS['__fake_as_single_actions']) === 1, 'ensure_scheduled دوباره صدا زده شود نوبت تکراری نمی‌سازد');
+test_assert(count(array_filter($GLOBALS['__fake_as_single_actions'], static fn (array $a): bool => $a['hook'] === HCI_Sync::SLOT_HOOK)) === 1, 'ensure_scheduled دوباره صدا زده شود نوبت تکراری نمی‌سازد');
 
 // اجرای دیرهنگام نوبت (۰۹:۰۱) — نوبت بعد باید فردا ۰۶:۰۰ باشد، نه فردا ۰۹:۰۱.
 $GLOBALS['__fake_as_single_actions'] = array();

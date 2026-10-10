@@ -7,6 +7,7 @@ require_once __DIR__ . '/bootstrap.php';
 echo "HeyMode — ساخت تنوع‌ها (Variation)، موجودی تنوع‌ها، ترمیم (PHP " . PHP_VERSION . ")\n";
 require_once HMW_REPO_ROOT . '/includes/class-hmw-sync.php';
 HCI_Source_Client::configure_delays_for_tests(0, 0);
+$GLOBALS['__stub_auto_health'] = true;
 
 function vf_reset(): Fake_WPDB {
     hci_test_reset_wc_fakes();

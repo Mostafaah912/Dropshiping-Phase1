@@ -7,6 +7,7 @@ require_once __DIR__ . '/bootstrap.php';
 echo "HeyMode — ابزار تشخیصی سینک (S1-01): تاریخچه ۳۰ اجرای مشتری + چند Full Sync آخر مبدا (PHP " . PHP_VERSION . ")\n";
 
 HCI_Source_Client::configure_delays_for_tests(0, 0);
+$GLOBALS['__stub_auto_health'] = true;
 
 function sd_reset(): Fake_WPDB {
     hci_test_reset_wc_fakes();

@@ -77,6 +77,18 @@ final class HMW_REST_API {
             ),
         ));
 
+        // تطبیق کامل مشتری: وضعیت چند محصول مشخص (بدون Cursor) در یک درخواست.
+        register_rest_route(self::NAMESPACE, '/products/batch', array(
+            array(
+                'methods' => WP_REST_Server::READABLE,
+                'callback' => array(__CLASS__, 'products_batch'),
+                'permission_callback' => array(__CLASS__, 'authorize'),
+                'args' => array(
+                    'ids' => array('required' => true, 'sanitize_callback' => 'sanitize_text_field'),
+                ),
+            ),
+        ));
+
         register_rest_route(self::NAMESPACE, '/products/(?P<id>\d+)', array(
             array(
                 'methods' => WP_REST_Server::READABLE,
@@ -589,6 +601,74 @@ final class HMW_REST_API {
         }
 
         return $formatted;
+    }
+
+    /**
+     * وضعیت فعلی چند محصول مشخص (حداکثر ۱۰۰ شناسه والد) با همه تنوع‌ها —
+     * حتی غیرفعال‌ها (با is_active). شناسه‌هایی که در مبدا نیستند در missing
+     * می‌آیند تا کلاینت آن‌ها را بی‌صدا تغییر ندهد.
+     */
+    public static function products_batch(WP_REST_Request $request): WP_REST_Response {
+        global $wpdb;
+        $raw = (string) $request->get_param('ids');
+        $ids = array_values(array_unique(array_filter(array_map('intval', explode(',', $raw)), static fn (int $i): bool => $i > 0)));
+        if (!$ids || count($ids) > 100) {
+            return new WP_REST_Response(array(
+                'success' => false,
+                'error' => array('code' => 'invalid_ids', 'message' => 'ids باید فهرستی از ۱ تا ۱۰۰ شناسه محصول (با ویرگول) باشد.'),
+            ), 400);
+        }
+
+        $table = HMW_DB::products_table();
+        $placeholders = implode(',', array_fill(0, count($ids), '%d'));
+        $parents = $wpdb->get_results($wpdb->prepare(
+            "SELECT source_product_id, product_type, sku, price, stock_quantity, stock_status, is_active FROM {$table} WHERE source_product_id IN ({$placeholders}) AND parent_product_id IS NULL",
+            $ids
+        ), ARRAY_A);
+        $parents = is_array($parents) ? $parents : array();
+
+        $found_ids = array_map(static fn (array $r): int => (int) $r['source_product_id'], $parents);
+        $variable_ids = array_map(
+            static fn (array $r): int => (int) $r['source_product_id'],
+            array_values(array_filter($parents, static fn (array $r): bool => (string) $r['product_type'] === 'variable'))
+        );
+
+        $children_by_parent = array();
+        if ($variable_ids) {
+            $child_placeholders = implode(',', array_fill(0, count($variable_ids), '%d'));
+            $children = $wpdb->get_results($wpdb->prepare(
+                "SELECT source_product_id, parent_product_id, sku, price, stock_quantity, stock_status, is_active FROM {$table} WHERE parent_product_id IN ({$child_placeholders}) AND product_type = 'variation' ORDER BY source_product_id ASC",
+                $variable_ids
+            ), ARRAY_A);
+            foreach ((array) $children as $child) {
+                $children_by_parent[(int) $child['parent_product_id']][] = array(
+                    'variation_id' => (int) $child['source_product_id'],
+                    'sku' => $child['sku'] !== null ? (string) $child['sku'] : null,
+                    'price' => $child['price'] !== null ? (string) $child['price'] : null,
+                    'stock_quantity' => $child['stock_quantity'] !== null ? (float) $child['stock_quantity'] : null,
+                    'stock_status' => (string) ($child['stock_status'] ?? ''),
+                    'is_active' => (bool) $child['is_active'],
+                );
+            }
+        }
+
+        $items = array();
+        foreach ($parents as $row) {
+            $item = self::delta_item($row);
+            $item['product_type'] = (string) $row['product_type'];
+            $item['variations'] = $children_by_parent[(int) $row['source_product_id']] ?? array();
+            $items[] = $item;
+        }
+
+        return new WP_REST_Response(array(
+            'success' => true,
+            'data' => $items,
+            'missing' => array_values(array_diff($ids, $found_ids)),
+            'server' => array(
+                'generated_at_utc' => gmdate('c'),
+                'plugin_version' => HMW_VERSION,
+            ),
+        ), 200);
     }
 
     public static function products_delta(WP_REST_Request $request): WP_REST_Response {

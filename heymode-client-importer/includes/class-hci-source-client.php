@@ -225,6 +225,54 @@ final class HCI_Source_Client {
         return array('success' => $item !== null, 'configured' => true, 'not_found' => false, 'item' => $item, 'message' => '');
     }
 
+    /**
+     * وضعیت Full Sync مبدا از /health — فقط برای تصمیم «الان سینک کنم یا کمی صبر کنم».
+     * @return array{success:bool,full_sync_status:string}
+     */
+    public static function get_source_health(): array {
+        $api_url = trim((string) get_option('hci_api_url', ''));
+        $api_key = trim((string) get_option('hci_api_key', ''));
+        if ($api_url === '' || $api_key === '') {
+            return array('success' => false, 'full_sync_status' => '');
+        }
+        $result = self::request_json(rtrim($api_url, '/') . '/health', $api_key, 10);
+        if (!$result['success'] || !is_array($result['data'])) {
+            return array('success' => false, 'full_sync_status' => '');
+        }
+        return array('success' => true, 'full_sync_status' => (string) ($result['data']['full_sync_status'] ?? ''));
+    }
+
+    /**
+     * وضعیت فعلی چند محصول مشخص (تا ۱۰۰ شناسه) — برای «تطبیق کامل».
+     * @return array{success:bool,items:array,missing:int[],not_supported:bool,message:string}
+     */
+    public static function get_products_batch(array $source_product_ids): array {
+        $api_url = trim((string) get_option('hci_api_url', ''));
+        $api_key = trim((string) get_option('hci_api_key', ''));
+        if ($api_url === '' || $api_key === '') {
+            return array('success' => false, 'items' => array(), 'missing' => array(), 'not_supported' => false, 'message' => 'اتصال به هی‌مد تنظیم نشده است.');
+        }
+        $ids = array_values(array_unique(array_filter(array_map('intval', $source_product_ids))));
+        $url = add_query_arg(array('ids' => implode(',', $ids)), rtrim($api_url, '/') . '/products/batch');
+        $result = self::request_json_with_retry($url, $api_key, 20);
+        if (!$result['success']) {
+            return array(
+                'success' => false,
+                'items' => array(),
+                'missing' => array(),
+                'not_supported' => ($result['status'] ?? 0) === 404,
+                'message' => (string) ($result['message'] ?? ''),
+            );
+        }
+        return array(
+            'success' => true,
+            'items' => is_array($result['data']) ? $result['data'] : array(),
+            'missing' => array_map('intval', (array) ($result['missing'] ?? array())),
+            'not_supported' => false,
+            'message' => '',
+        );
+    }
+
     private static function fetch_products_page_with_retry(string $api_url, string $api_key, int $page): array {
         $url = add_query_arg(array(
             'page' => $page,
@@ -286,6 +334,7 @@ final class HCI_Source_Client {
             'success' => true,
             'data' => $json['data'] ?? array(),
             'pagination' => $json['pagination'] ?? array(),
+            'missing' => $json['missing'] ?? array(),
             'status' => $status,
         );
     }

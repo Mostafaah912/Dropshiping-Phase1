@@ -7,6 +7,7 @@ require_once __DIR__ . '/bootstrap.php';
 echo "HeyMode Client Importer — سینک محصول Variable: والد قیمت/موجودی نمی‌گیرد، غیرفعال‌شدن والد همه تنوع‌ها را ناموجود می‌کند (S1-08، S1-09) (PHP " . PHP_VERSION . ")\n";
 
 HCI_Source_Client::configure_delays_for_tests(0, 0);
+$GLOBALS['__stub_auto_health'] = true;
 
 function sv_reset(): Fake_WPDB {
     hci_test_reset_wc_fakes();

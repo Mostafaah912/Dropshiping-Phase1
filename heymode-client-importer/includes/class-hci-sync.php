@@ -8,6 +8,10 @@ final class HCI_Sync {
     // نوبت ساعت ۰۶:۰۰ تهران. جدا از DAILY_HOOK (Retry/دستی) است تا هر اجرا
     // نوبت بعد را دقیقاً روی ۰۶:۰۰ فردا بگذارد و با تأخیر Pseudo-Cron نلغزد.
     public const SLOT_HOOK = 'hci_daily_sync_slot';
+    // تطبیق کامل هفتگی (شبکه ایمنی) — جمعه‌ها ۰۷:۰۰ تهران، بعد از سینک ۰۶:۰۰.
+    public const RECONCILE_HOOK = 'hci_weekly_reconcile_slot';
+    private const RECONCILE_SUMMARY_OPTION = 'hci_last_reconcile_summary';
+    private const RECONCILE_CHUNK = 50;
     private const SCHEDULE_VERSION_OPTION = 'hci_sync_schedule_version';
     private const GROUP = 'hci-sync';
     private const CURSOR_OPTION = 'hci_sync_cursor_gmt';
@@ -21,6 +25,8 @@ final class HCI_Sync {
         add_action('init', array(__CLASS__, 'ensure_scheduled'));
         add_action(self::DAILY_HOOK, array(__CLASS__, 'run_daily_sync'));
         add_action(self::SLOT_HOOK, array(__CLASS__, 'run_scheduled_slot'));
+        add_action(self::RECONCILE_HOOK, array(__CLASS__, 'run_scheduled_reconcile'));
+        add_action('admin_post_hci_reconcile_now', array(__CLASS__, 'handle_reconcile_now'));
         add_action('admin_menu', array(__CLASS__, 'admin_menu'), 20);
         add_action('admin_post_hci_sync_now', array(__CLASS__, 'handle_sync_now'));
     }
@@ -50,10 +56,99 @@ final class HCI_Sync {
             }
             update_option(self::SCHEDULE_VERSION_OPTION, 2, false);
         }
+        if (!as_next_scheduled_action(self::RECONCILE_HOOK, array(), self::GROUP)) {
+            as_schedule_single_action(self::next_reconcile_timestamp(), self::RECONCILE_HOOK, array(), self::GROUP);
+        }
         if (as_next_scheduled_action(self::SLOT_HOOK, array(), self::GROUP)) {
             return;
         }
         as_schedule_single_action(self::next_slot_timestamp(), self::SLOT_HOOK, array(), self::GROUP);
+    }
+
+    /**
+     * نزدیک‌ترین جمعه ۰۷:۰۰ تهران که کاملاً بعد از $now باشد.
+     */
+    public static function next_reconcile_timestamp(?int $now = null): int {
+        $tz = new DateTimeZone(self::TIMEZONE);
+        $current = (new DateTimeImmutable('@' . ($now ?? time())))->setTimezone($tz);
+        $candidate = $current->setTime(7, 0, 0)->modify('+' . ((5 - (int) $current->format('N') + 7) % 7) . ' days');
+        if ($candidate <= $current) {
+            $candidate = $candidate->modify('+7 days');
+        }
+        return $candidate->setTime(7, 0, 0)->getTimestamp();
+    }
+
+    public static function run_scheduled_reconcile(?int $now = null): array {
+        if (function_exists('as_schedule_single_action') && function_exists('as_next_scheduled_action')
+            && !as_next_scheduled_action(self::RECONCILE_HOOK, array(), self::GROUP)) {
+            as_schedule_single_action(self::next_reconcile_timestamp($now), self::RECONCILE_HOOK, array(), self::GROUP);
+        }
+        return self::run_full_reconcile(false);
+    }
+
+    public static function handle_reconcile_now(): void {
+        if (!current_user_can(self::CAPABILITY)) {
+            wp_die(esc_html__('Access denied.', 'heymode-client-importer'));
+        }
+        check_admin_referer('hci_reconcile_now');
+        $summary = self::run_full_reconcile(true);
+        wp_safe_redirect(add_query_arg(array('page' => 'heymode-client-importer-sync', 'hci_notice' => !empty($summary['success']) ? 'reconciled' : 'reconcile_failed'), admin_url('admin.php')));
+        exit;
+    }
+
+    /**
+     * «تطبیق کامل»: فقط محصولات Import‌شده، بدون وابستگی به Cursor، قیمت/موجودی/
+     * وضعیت هر کدام با مبدا مقایسه و اصلاح می‌شود (دسته‌های ۵۰تایی، یک درخواست
+     * برای هر دسته). Cursor و شمارنده Retry را لمس نمی‌کند.
+     */
+    public static function run_full_reconcile(bool $manual = true): array {
+        $started_at = current_time('mysql', true);
+        $summary = array(
+            'started_at' => $started_at,
+            'manual' => $manual,
+            'success' => true,
+            'checked' => 0,
+            'price_updated' => 0,
+            'stock_updated' => 0,
+            'deactivated' => 0,
+            'errors' => 0,
+            'missing' => 0,
+            'message' => '',
+            'kind' => 'reconcile',
+            'cursor_before' => (string) get_option(self::CURSOR_OPTION, ''),
+            'cursor_advanced' => false,
+            'error_samples' => array(),
+        );
+
+        HCI_DB::reconcile_removed();
+        $parent_by_source_id = array();
+        foreach (HCI_DB::get_imported_parent_rows() as $prow) {
+            $parent_by_source_id[(int) $prow['source_product_id']] = $prow;
+        }
+        $imported_variations = HCI_DB::get_imported_variation_rows_for_parents(array_keys($parent_by_source_id));
+
+        foreach (array_chunk(array_keys($parent_by_source_id), self::RECONCILE_CHUNK) as $chunk) {
+            $batch = HCI_Source_Client::get_products_batch($chunk);
+            if (!$batch['success']) {
+                $summary['success'] = false;
+                $summary['errors']++;
+                $summary['message'] = !empty($batch['not_supported'])
+                    ? 'افزونه سایت هی‌مد باید آپدیت شود تا بررسی کامل کار کند.'
+                    : 'دریافت اطلاعات از هی‌مد ناموفق بود: ' . $batch['message'];
+                break;
+            }
+            $counts = self::apply_items($batch['items'], $parent_by_source_id, $imported_variations);
+            foreach (array('checked', 'price_updated', 'stock_updated', 'deactivated', 'errors') as $key) {
+                $summary[$key] += $counts[$key];
+            }
+            $summary['error_samples'] = array_slice(array_merge($summary['error_samples'], $counts['error_samples']), 0, 5);
+            $summary['missing'] += count($batch['missing']);
+        }
+
+        $summary['finished_at'] = current_time('mysql', true);
+        self::push_history($summary);
+        update_option(self::RECONCILE_SUMMARY_OPTION, $summary, false);
+        return $summary;
     }
 
     /**
@@ -162,6 +257,14 @@ final class HCI_Sync {
             <h1>بروزرسانی قیمت و موجودی</h1>
             <p>هر روز صبح ساعت ۶، قیمت و موجودی محصولاتی که از هی‌مد وارد کرده‌اید خودکار با هی‌مد هماهنگ می‌شود.</p>
 
+            <?php if ($notice === 'reconciled' || $notice === 'reconcile_failed') : ?>
+                <?php $rs = get_option(self::RECONCILE_SUMMARY_OPTION, null); ?>
+                <?php if ($notice === 'reconciled') : ?>
+                    <div class="notice notice-success is-dismissible"><p>بررسی کامل انجام شد<?php echo is_array($rs) ? ' — ' . esc_html(self::to_persian_digits((string) (int) ($rs['checked'] ?? 0))) . ' مورد بررسی و ' . esc_html(self::to_persian_digits((string) ((int) ($rs['price_updated'] ?? 0) + (int) ($rs['stock_updated'] ?? 0) + (int) ($rs['deactivated'] ?? 0)))) . ' تغییر اعمال شد.' : '.'; ?></p></div>
+                <?php else : ?>
+                    <div class="notice notice-warning is-dismissible"><p><?php echo esc_html(is_array($rs) && !empty($rs['message']) ? (string) $rs['message'] : 'بررسی کامل انجام نشد. کمی بعد دوباره تلاش کنید.'); ?></p></div>
+                <?php endif; ?>
+            <?php endif; ?>
             <?php if ($notice === 'synced') : ?>
                 <?php $ok = is_array($summary) && !empty($summary['success']); ?>
                 <div class="notice notice-<?php echo $ok ? 'success' : 'warning'; ?> is-dismissible"><p><?php echo $ok ? 'بروزرسانی انجام شد.' : 'بروزرسانی انجام نشد. کمی بعد دوباره تلاش کنید.'; ?></p></div>
@@ -201,6 +304,12 @@ final class HCI_Sync {
                 <p>این بخش فقط برای پشتیبان فنی است. جزئیات (زمان دقیق به وقت جهانی، اجرای خودکار با سرور) در فایل README پلاگین آمده است.</p>
                 <p>آخرین نقطه هماهنگی موفق: <?php echo $cursor !== '' ? esc_html($cursor) . ' UTC' : '-'; ?></p>
                 <pre style="background:#f6f7f7;padding:8px;overflow:auto">0 6 * * * cd /path/to/wordpress && wp hci sync --quiet</pre>
+                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="margin:12px 0">
+                    <input type="hidden" name="action" value="hci_reconcile_now">
+                    <?php wp_nonce_field('hci_reconcile_now'); ?>
+                    <button type="submit" class="button">بررسی کامل همه محصولات وارد‌شده</button>
+                    <span style="margin-right:8px">قیمت، موجودی و وضعیت همه را دوباره با هی‌مد مقایسه می‌کند (کمی طول می‌کشد). خودکار هم هر هفته جمعه‌ها انجام می‌شود.</span>
+                </form>
                 <?php self::render_history_table(); ?>
             </div>
             <script>
@@ -216,7 +325,7 @@ final class HCI_Sync {
 
     private static function render_history_table(): void {
         $history = self::get_history();
-        $kinds = array('scheduled' => 'خودکار ۰۶:۰۰', 'retry' => 'تلاش مجدد', 'manual' => 'دستی');
+        $kinds = array('scheduled' => 'خودکار ۰۶:۰۰', 'retry' => 'تلاش مجدد', 'manual' => 'دستی', 'reconcile' => 'تطبیق کامل');
         $tz = new DateTimeZone(self::TIMEZONE);
         $fmt = static function ($utc) use ($tz): string {
             $ts = is_string($utc) && $utc !== '' ? strtotime($utc . ' UTC') : false;
@@ -269,6 +378,32 @@ final class HCI_Sync {
             $cursor = '1970-01-01 00:00:00';
         }
 
+        // Full Sync ساعت ۰۴:۰۰ مبدا ممکن است تا ۰۶:۰۰ طول بکشد؛ اگر هنوز در حال
+        // اجراست کمی صبر می‌کنیم (Backoff همان Retry: ۵ و بعد ۱۰ دقیقه). بعد از
+        // دو بار انتظار بی‌خیال می‌شویم چون Cursor امن است. دستی هیچ‌وقت منتظر نمی‌ماند.
+        if (!$manual && (int) get_option(self::RETRY_COUNT_OPTION, 0) < 2) {
+            $health = HCI_Source_Client::get_source_health();
+            if (!empty($health['success']) && $health['full_sync_status'] === 'running') {
+                self::schedule_retry();
+                return self::finish(array(
+                    'started_at' => $request_started_at,
+                    'manual' => $manual,
+                    'success' => false,
+                    'deferred' => true,
+                    'checked' => 0,
+                    'price_updated' => 0,
+                    'stock_updated' => 0,
+                    'deactivated' => 0,
+                    'errors' => 0,
+                    'message' => 'هی‌مد همین الان در حال هماهنگی داده‌هاست؛ چند دقیقه بعد دوباره امتحان می‌شود.',
+                    'kind' => $kind,
+                    'cursor_before' => $cursor,
+                    'cursor_advanced' => false,
+                    'error_samples' => array(),
+                ), false);
+            }
+        }
+
         $result = HCI_Source_Client::get_delta_products($cursor);
 
         if (!$result['success']) {
@@ -302,6 +437,44 @@ final class HCI_Sync {
         }
         $imported_variations = HCI_DB::get_imported_variation_rows_for_parents(array_keys($parent_by_source_id));
 
+        $counts = self::apply_items((array) $result['items'], $parent_by_source_id, $imported_variations);
+        $checked = $counts['checked'];
+        $price_updated = $counts['price_updated'];
+        $stock_updated = $counts['stock_updated'];
+        $deactivated = $counts['deactivated'];
+        $errors = $counts['errors'];
+        $error_samples = $counts['error_samples'];
+
+        // Cursor فقط وقتی جلو می‌رود که هیچ محصولی خطا نداده باشد؛ وگرنه
+        // محصول خطادار دور بعد دوباره در Delta می‌آید (همان‌طور که پیام صفحه
+        // می‌گوید «دوباره امتحان می‌شود»). اعمال دوباره بدون تغییر، بی‌ضرر است.
+        $cursor_advanced = $errors === 0;
+        if ($cursor_advanced) {
+            update_option(self::CURSOR_OPTION, $request_started_at, false);
+        }
+
+        return self::finish(array(
+            'started_at' => $request_started_at,
+            'manual' => $manual,
+            'success' => true,
+            'checked' => $checked,
+            'price_updated' => $price_updated,
+            'stock_updated' => $stock_updated,
+            'deactivated' => $deactivated,
+            'errors' => $errors,
+            'message' => '',
+            'kind' => $kind,
+            'cursor_before' => $cursor,
+            'cursor_advanced' => $cursor_advanced,
+            'error_samples' => $error_samples,
+        ), true);
+    }
+
+    /**
+     * قاعده مشترک اعمال آیتم‌های مبدا (هم Delta روزانه هم تطبیق کامل).
+     * @return array{checked:int,price_updated:int,stock_updated:int,deactivated:int,errors:int,error_samples:string[]}
+     */
+    private static function apply_items(array $items, array $parent_by_source_id, array $imported_variations): array {
         $checked = 0;
         $price_updated = 0;
         $stock_updated = 0;
@@ -314,7 +487,7 @@ final class HCI_Sync {
             }
         };
 
-        foreach ((array) $result['items'] as $item) {
+        foreach ($items as $item) {
             $source_id = (int) ($item['source_product_id'] ?? 0);
             $parent_row = $parent_by_source_id[$source_id] ?? null;
 
@@ -368,7 +541,7 @@ final class HCI_Sync {
                 $variation_row_by_id[(int) $vrow['source_variation_id']] = $vrow;
             }
             $any_variation_changed = false;
-            foreach ((array) $item['variations'] as $variation_item) {
+            foreach ((array) ($item['variations'] ?? array()) as $variation_item) {
                 $source_variation_id = (int) ($variation_item['variation_id'] ?? 0);
                 $vrow = $variation_row_by_id[$source_variation_id] ?? null;
                 if (!$vrow) {
@@ -400,29 +573,7 @@ final class HCI_Sync {
             }
         }
 
-        // Cursor فقط وقتی جلو می‌رود که هیچ محصولی خطا نداده باشد؛ وگرنه
-        // محصول خطادار دور بعد دوباره در Delta می‌آید (همان‌طور که پیام صفحه
-        // می‌گوید «دوباره امتحان می‌شود»). اعمال دوباره بدون تغییر، بی‌ضرر است.
-        $cursor_advanced = $errors === 0;
-        if ($cursor_advanced) {
-            update_option(self::CURSOR_OPTION, $request_started_at, false);
-        }
-
-        return self::finish(array(
-            'started_at' => $request_started_at,
-            'manual' => $manual,
-            'success' => true,
-            'checked' => $checked,
-            'price_updated' => $price_updated,
-            'stock_updated' => $stock_updated,
-            'deactivated' => $deactivated,
-            'errors' => $errors,
-            'message' => '',
-            'kind' => $kind,
-            'cursor_before' => $cursor,
-            'cursor_advanced' => $cursor_advanced,
-            'error_samples' => $error_samples,
-        ), true);
+        return compact('checked', 'price_updated', 'stock_updated', 'deactivated', 'errors', 'error_samples');
     }
 
     /**
@@ -468,11 +619,15 @@ final class HCI_Sync {
         return is_array($history) ? array_values($history) : array();
     }
 
-    private static function finish(array $summary, bool $success): array {
-        $summary['finished_at'] = current_time('mysql', true);
+    private static function push_history(array $summary): void {
         $history = self::get_history();
         array_unshift($history, $summary);
         update_option(self::HISTORY_OPTION, array_slice($history, 0, self::HISTORY_LIMIT), false);
+    }
+
+    private static function finish(array $summary, bool $success): array {
+        $summary['finished_at'] = current_time('mysql', true);
+        self::push_history($summary);
         update_option(self::RETRY_COUNT_OPTION, $success ? 0 : (int) get_option(self::RETRY_COUNT_OPTION, 0), false);
         update_option(self::SUMMARY_OPTION, $summary, false);
         return $summary;

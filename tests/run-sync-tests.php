@@ -8,6 +8,7 @@ echo "HeyMode Client Importer — سینک روزانه (PHP " . PHP_VERSION . "
 echo "فقط Price/Stock، Overwrite فرمول، Out of Stock شدن محصول غیرفعال، شکست API + Backoff، Cursor فقط بعد از موفقیت — روی کد production واقعی.\n";
 
 HCI_Source_Client::configure_delays_for_tests(0, 0);
+$GLOBALS['__stub_auto_health'] = true;
 
 function hci_sync_delta_response(array $items, int $total_pages = 1): array {
     return array(

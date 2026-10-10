@@ -262,6 +262,14 @@ function is_wp_error($thing): bool {
 
 function wp_remote_get(string $url, array $args = array()) {
     $GLOBALS['__test_last_requested_urls'][] = $url;
+    // سوییت‌های سینک: درخواست /health (بررسی قبل از سینک) صف پاسخ‌های اصلی را
+    // مصرف نمی‌کند؛ پیش‌فرض «مبدا آزاد است» و با __stub_health_response قابل تغییر.
+    if (!empty($GLOBALS['__stub_auto_health']) && strpos($url, '/health') !== false) {
+        return $GLOBALS['__stub_health_response_override'] ?? array(
+            'response' => array('code' => 200, 'message' => 'OK'),
+            'body' => json_encode(array('success' => true, 'data' => array('api' => 'ok', 'full_sync_status' => 'idle'))),
+        );
+    }
     // برای سناریوهایی که هر فراخوانی متوالی باید پاسخ متفاوتی بدهد (مثلاً
     // ۴۲۹ در یک درخواست و ۲۰۰ در بعدی)، یک صف اختیاری از پاسخ‌ها را هم
     // پشتیبانی می‌کنیم؛ اگر خالی/تنظیم‌نشده باشد، رفتار قبلی (یک پاسخ ثابت

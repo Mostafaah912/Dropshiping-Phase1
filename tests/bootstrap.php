@@ -449,7 +449,12 @@ final class Fake_WPDB {
     }
 
     public function query(string $query) {
-        $result = $this->pdo->exec($query);
+        try {
+            $result = $this->pdo->exec($query);
+        } catch (PDOException $e) {
+            $this->last_error = $e->getMessage();
+            return false;
+        }
         if ($result === false) {
             $this->last_error = implode(' ', $this->pdo->errorInfo());
             return false;
@@ -461,8 +466,18 @@ final class Fake_WPDB {
         $columns = array_keys($data);
         $placeholders = array_fill(0, count($columns), '?');
         $sql = 'INSERT INTO ' . $table . ' (' . implode(',', $columns) . ') VALUES (' . implode(',', $placeholders) . ')';
+        if (!empty($GLOBALS['__fake_wpdb_before_insert']) && is_callable($GLOBALS['__fake_wpdb_before_insert'])) {
+            $hook = $GLOBALS['__fake_wpdb_before_insert'];
+            $GLOBALS['__fake_wpdb_before_insert'] = null;
+            $hook();
+        }
         $stmt = $this->pdo->prepare($sql);
-        $ok = $stmt->execute(array_values($data));
+        try {
+            $ok = $stmt->execute(array_values($data));
+        } catch (PDOException $e) {
+            $this->last_error = $e->getMessage(); // مثل MySQL: نقض کلید یکتا ⇒ false
+            return false;
+        }
         if ($ok) {
             $this->insert_id = (int) $this->pdo->lastInsertId();
         }
@@ -563,6 +578,7 @@ function hci_test_create_product_map_db(): Fake_WPDB {
             source_product_id INTEGER NOT NULL,
             source_sku TEXT NULL,
             source_variation_id INTEGER NULL,
+            variation_key INTEGER NOT NULL DEFAULT 0,
             dest_product_id INTEGER NULL,
             dest_variation_id INTEGER NULL,
             dest_sku TEXT NULL,

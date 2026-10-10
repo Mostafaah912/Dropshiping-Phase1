@@ -29,6 +29,7 @@ final class HCI_DB {
             source_product_id BIGINT UNSIGNED NOT NULL,
             source_sku VARCHAR(191) NULL,
             source_variation_id BIGINT UNSIGNED NULL,
+            variation_key BIGINT UNSIGNED NOT NULL DEFAULT 0,
             dest_product_id BIGINT UNSIGNED NULL,
             dest_variation_id BIGINT UNSIGNED NULL,
             dest_sku VARCHAR(191) NULL,
@@ -56,6 +57,76 @@ final class HCI_DB {
         if (version_compare($version, HCI_VERSION, '<')) {
             self::create_tables();
         }
+        self::run_pending_migrations();
+    }
+
+    public static function run_pending_migrations(): void {
+        if ((string) get_option('hci_unique_key_ready', '') !== '1') {
+            self::migrate_unique_key();
+        }
+    }
+
+    /**
+     * کلید یکتا روی (source_product_id + شناسه تنوع یا ۰): جلوگیری از ردیف
+     * تکراری با دو درخواست هم‌زمان. چون MySQL ستون NULL را در کلید یکتا یکتا
+     * نمی‌داند، ستون variation_key (۰ برای والد) نگهداری می‌شود. مهاجرت امن:
+     * اول ستون پر می‌شود، تکراری‌های موجود (بهترین ردیف می‌ماند) پاک می‌شوند،
+     * بعد کلید ساخته می‌شود؛ هر مرحله Idempotent است.
+     */
+    public static function migrate_unique_key(): bool {
+        global $wpdb;
+        $table = self::product_map_table();
+
+        $wpdb->query("UPDATE {$table} SET variation_key = COALESCE(source_variation_id, 0)");
+
+        $groups = $wpdb->get_results(
+            "SELECT source_product_id, variation_key FROM {$table} GROUP BY source_product_id, variation_key HAVING COUNT(*) > 1",
+            ARRAY_A
+        );
+        $rank = array(
+            self::STATUS_IMPORTED => 0,
+            self::STATUS_PARTIAL => 1,
+            self::STATUS_PROCESSING => 2,
+            self::STATUS_QUEUED => 3,
+            self::STATUS_ERROR => 4,
+            self::STATUS_DUPLICATE => 5,
+            self::STATUS_REMOVED => 6,
+        );
+        foreach ((array) $groups as $group) {
+            $rows = $wpdb->get_results($wpdb->prepare(
+                "SELECT id, import_status, dest_product_id, dest_variation_id, updated_at FROM {$table} WHERE source_product_id = %d AND variation_key = %d",
+                (int) $group['source_product_id'],
+                (int) $group['variation_key']
+            ), ARRAY_A);
+            usort($rows, static function (array $a, array $b) use ($rank): int {
+                $ra = $rank[$a['import_status']] ?? 9;
+                $rb = $rank[$b['import_status']] ?? 9;
+                if ($ra !== $rb) {
+                    return $ra <=> $rb;
+                }
+                $da = (!empty($a['dest_product_id']) || !empty($a['dest_variation_id'])) ? 0 : 1;
+                $db = (!empty($b['dest_product_id']) || !empty($b['dest_variation_id'])) ? 0 : 1;
+                if ($da !== $db) {
+                    return $da <=> $db;
+                }
+                if ((string) $a['updated_at'] !== (string) $b['updated_at']) {
+                    return strcmp((string) $b['updated_at'], (string) $a['updated_at']);
+                }
+                return (int) $a['id'] <=> (int) $b['id'];
+            });
+            foreach (array_slice($rows, 1) as $extra) {
+                $wpdb->query($wpdb->prepare("DELETE FROM {$table} WHERE id = %d", (int) $extra['id']));
+            }
+        }
+
+        $created = $wpdb->query("CREATE UNIQUE INDEX hci_source_variation ON {$table} (source_product_id, variation_key)");
+        $already = $created === false && (stripos((string) $wpdb->last_error, 'already exists') !== false || stripos((string) $wpdb->last_error, 'Duplicate key name') !== false);
+        if ($created === false && !$already) {
+            error_log('[HCI] ساخت کلید یکتای جدول ردیابی ناموفق بود: ' . $wpdb->last_error);
+            return false;
+        }
+        update_option('hci_unique_key_ready', '1', false);
+        return true;
     }
 
     /**
@@ -183,6 +254,7 @@ final class HCI_DB {
 
         $result = $wpdb->insert(self::product_map_table(), array(
             'source_product_id' => $source_product_id,
+            'variation_key' => 0,
             'source_sku' => $source_sku,
             'import_payload' => $payload_json,
             'import_status' => self::STATUS_QUEUED,
@@ -190,6 +262,18 @@ final class HCI_DB {
             'updated_at' => $now,
         ));
         if ($result === false) {
+            // درخواست هم‌زمان دیگری همین ردیف را ساخته (کلید یکتا): همان را به‌روز می‌کنیم.
+            $winner = self::get_map_row($source_product_id);
+            if ($winner) {
+                $updated = $wpdb->update(
+                    self::product_map_table(),
+                    array('source_sku' => $source_sku, 'import_payload' => $payload_json, 'import_status' => self::STATUS_QUEUED, 'error_message' => null, 'updated_at' => $now),
+                    array('id' => (int) $winner['id'])
+                );
+                if ($updated !== false) {
+                    return array('success' => true, 'id' => (int) $winner['id']);
+                }
+            }
             return array('success' => false, 'message' => $wpdb->last_error);
         }
         return array('success' => true, 'id' => (int) $wpdb->insert_id);
@@ -335,8 +419,16 @@ final class HCI_DB {
 
         $fields['source_product_id'] = $parent_source_id;
         $fields['source_variation_id'] = $source_variation_id;
+        $fields['variation_key'] = $source_variation_id;
         $fields['created_at'] = $now;
-        $wpdb->insert(self::product_map_table(), $fields);
+        if ($wpdb->insert(self::product_map_table(), $fields) === false) {
+            // رقابت هم‌زمان: ردیف همین تنوع قبلاً ساخته شده؛ همان را به‌روز کن.
+            $winner = self::get_map_row($parent_source_id, $source_variation_id);
+            if ($winner) {
+                unset($fields['source_product_id'], $fields['source_variation_id'], $fields['variation_key'], $fields['created_at']);
+                $wpdb->update(self::product_map_table(), $fields, array('id' => (int) $winner['id']));
+            }
+        }
     }
 
     /**

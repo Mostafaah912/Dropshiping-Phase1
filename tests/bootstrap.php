@@ -141,6 +141,16 @@ function add_filter(string $hook, $callback, int $priority = 10, int $accepted_a
     $GLOBALS['__test_hooks'][$hook][] = $callback;
 }
 
+function remove_filter(string $hook, $callback, int $priority = 10): bool {
+    foreach ($GLOBALS['__test_hooks'][$hook] ?? array() as $i => $cb) {
+        if ($cb === $callback) {
+            unset($GLOBALS['__test_hooks'][$hook][$i]);
+            return true;
+        }
+    }
+    return false;
+}
+
 function do_action_test(string $hook): void {
     foreach ($GLOBALS['__test_hooks'][$hook] ?? array() as $callback) {
         call_user_func($callback);
@@ -657,6 +667,11 @@ class WC_Product {
     public function get_attributes(): array { return $this->data['attributes']; }
 
     public function save(): int {
+        if ($this->product_type === 'variation' && !empty($GLOBALS['__fake_wc_on_variation_save']) && is_callable($GLOBALS['__fake_wc_on_variation_save'])) {
+            $hook = $GLOBALS['__fake_wc_on_variation_save'];
+            $GLOBALS['__fake_wc_on_variation_save'] = null; // فقط یک‌بار (جلوگیری از بازگشت بی‌نهایت)
+            $hook();
+        }
         if ($this->product_type === 'variation' && !empty($GLOBALS['__fake_wc_variation_save_throws'])) {
             throw new RuntimeException('شبیه‌سازی خطای ساخت تنوع');
         }
@@ -813,6 +828,17 @@ function media_sideload_image(string $url, $post_id = 0, $desc = null, string $r
     if (!empty($GLOBALS['__fake_media_sideload_fail_urls'][$url])) {
         return new WP_Error('media_sideload_image_failed', 'دانلود تصویر شبیه‌سازی‌شده شکست خورد.');
     }
+    if (!empty($GLOBALS['__fake_on_sideload']) && is_callable($GLOBALS['__fake_on_sideload'])) {
+        $hook = $GLOBALS['__fake_on_sideload'];
+        $GLOBALS['__fake_on_sideload'] = null;
+        $hook();
+    }
+    // timeout مؤثر دانلود: وردپرس واقعی از فیلتر http_request_timeout (پیش‌فرض ۳۰۰) می‌خواند.
+    $timeout = 300;
+    foreach ($GLOBALS['__test_hooks']['http_request_timeout'] ?? array() as $cb) {
+        $timeout = call_user_func($cb, $timeout);
+    }
+    $GLOBALS['__fake_sideload_timeouts'][] = $timeout;
     $id = $GLOBALS['__fake_wc_next_id']++;
     $GLOBALS['__fake_postmeta'][$id] = $GLOBALS['__fake_postmeta'][$id] ?? array();
     return $id;

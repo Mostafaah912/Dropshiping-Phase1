@@ -196,17 +196,31 @@ final class HCI_DB {
     }
 
     /**
+     * ضربان کارگر: ردیفی که هنوز در حال پردازش است «زنده» می‌ماند و قفلش
+     * (حتی اگر پردازشش طولانی باشد) توسط کارگر دیگر آزاد نمی‌شود.
+     */
+    public static function touch_processing(int $source_product_id): void {
+        global $wpdb;
+        $wpdb->query($wpdb->prepare(
+            'UPDATE ' . self::product_map_table() . ' SET updated_at = %s WHERE source_product_id = %d AND source_variation_id IS NULL AND import_status = %s',
+            current_time('mysql', true),
+            $source_product_id,
+            self::STATUS_PROCESSING
+        ));
+    }
+
+    /**
      * قفل‌های قدیمی (ردیف‌هایی که processing مانده‌اند ولی started_at از حد
      * مشخص قدیمی‌تر است — یعنی کارگری که وسط کار قطع/کرش شده) را به queued
      * برمی‌گرداند تا دوباره Claim‌پذیر شوند. هم مسیر AJAX (hci_import_next)
      * هم Action Scheduler قبل از Claim کردن این را صدا می‌زنند.
      */
-    public static function release_stale_locks(int $stale_after_seconds = 300): int {
+    public static function release_stale_locks(int $stale_after_seconds = 900): int {
         global $wpdb;
         $table = self::product_map_table();
         $threshold = gmdate('Y-m-d H:i:s', time() - $stale_after_seconds);
         $result = $wpdb->query($wpdb->prepare(
-            "UPDATE {$table} SET import_status = %s, updated_at = %s WHERE import_status = %s AND started_at IS NOT NULL AND started_at < %s",
+            "UPDATE {$table} SET import_status = %s, updated_at = %s WHERE import_status = %s AND started_at IS NOT NULL AND COALESCE(updated_at, started_at) < %s",
             self::STATUS_QUEUED,
             current_time('mysql', true),
             self::STATUS_PROCESSING,

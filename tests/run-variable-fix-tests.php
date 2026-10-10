@@ -116,7 +116,7 @@ test_section('شکست ساخت تنوع ⇒ هرگز imported نمی‌شود +
 $w = vf_reset();
 $GLOBALS['__fake_wc_variation_save_throws'] = true;
 $row = vf_run(4995, vf_payload());
-test_assert($row['import_status'] === HCI_DB::STATUS_PARTIAL && $row['error_message'] === 'تنوع‌های محصول ساخته نشد.', 'partial با پیام ساده فارسی');
+test_assert($row['import_status'] === HCI_DB::STATUS_PARTIAL && strpos((string) $row['error_message'], 'ساخته نشدند') !== false, 'partial با پیام ساده فارسی (نام تنوع‌ها را می‌گوید)');
 $parentId = (int) $row['dest_product_id'];
 $GLOBALS['__fake_wc_variation_save_throws'] = false;
 $row = vf_run(4995, vf_payload()); // «تلاش مجدد»

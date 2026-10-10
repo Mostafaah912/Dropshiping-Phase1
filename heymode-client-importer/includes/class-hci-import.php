@@ -15,6 +15,16 @@ final class HCI_Import {
     public const SOURCE_PRODUCT_META_KEY = '_hci_source_product_id';
     public const IMAGE_META_KEY = '_hci_imported';
 
+    // ردیفی که همین الان این درخواست پردازشش می‌کند (برای ضربان قفل).
+    private static int $heartbeat_id = 0;
+    private const IMAGE_TIMEOUT_SECONDS = 20;
+
+    private static function heartbeat(): void {
+        if (self::$heartbeat_id > 0) {
+            HCI_DB::touch_processing(self::$heartbeat_id);
+        }
+    }
+
     public static function init(): void {
         add_action(self::ACTION_HOOK, array(__CLASS__, 'process_import_action'), 10, 1);
         add_action('wp_ajax_hci_queue_import', array(__CLASS__, 'ajax_queue_import'));
@@ -306,6 +316,32 @@ final class HCI_Import {
     }
 
     /**
+     * @return string[]
+     */
+    public static function media_include_paths(): array {
+        return array(
+            ABSPATH . 'wp-admin/includes/file.php',
+            ABSPATH . 'wp-admin/includes/image.php',
+            ABSPATH . 'wp-admin/includes/media.php',
+        );
+    }
+
+    /**
+     * در Action Scheduler / WP-Cron توابع رسانه‌ی بخش مدیریت بارگذاری نیستند و
+     * media_sideload_image بی‌صدا شکست می‌خورد؛ صریحاً بارگذاری‌شان می‌کنیم.
+     */
+    private static function load_media_functions(): void {
+        if (function_exists('media_sideload_image')) {
+            return;
+        }
+        foreach (self::media_include_paths() as $path) {
+            if (file_exists($path)) {
+                require_once $path;
+            }
+        }
+    }
+
+    /**
      * دانلود تصویر را با یک URL بین کل Batch (نه فقط یک محصول) دور می‌زند:
      * قبل از دانلود، به‌ازای همین URL در Meta پیوست‌ها جستجو می‌کند. چون هر
      * محصول به‌صورت یک Action Scheduler مجزا (یک درخواست PHP جدا) پردازش
@@ -324,10 +360,19 @@ final class HCI_Import {
             return (int) $existing[0];
         }
 
+        self::load_media_functions();
         if (!function_exists('media_sideload_image')) {
             return 0;
         }
-        $attachment_id = media_sideload_image($url, 0, null, 'id');
+        // دانلود تصویر نباید تا ۳۰۰ ثانیه (پیش‌فرض وردپرس) معطل بماند.
+        $timeout_filter = static fn ($timeout): int => self::IMAGE_TIMEOUT_SECONDS;
+        add_filter('http_request_timeout', $timeout_filter);
+        try {
+            $attachment_id = media_sideload_image($url, 0, null, 'id');
+        } finally {
+            remove_filter('http_request_timeout', $timeout_filter);
+        }
+        self::heartbeat();
         if (is_wp_error($attachment_id) || !$attachment_id) {
             return 0;
         }
@@ -417,6 +462,16 @@ final class HCI_Import {
      * وردپرس ثبت می‌شود (برای ریشه‌یابی کندی/خطای واقعی صف).
      */
     private static function process_claimed_row(int $source_product_id): array {
+        $previous = self::$heartbeat_id;
+        self::$heartbeat_id = $source_product_id;
+        try {
+            return self::process_claimed_row_inner($source_product_id);
+        } finally {
+            self::$heartbeat_id = $previous;
+        }
+    }
+
+    private static function process_claimed_row_inner(int $source_product_id): array {
         $t0 = microtime(true);
         self::log_step($source_product_id, 'claimed', $t0, $t0);
 
@@ -458,6 +513,7 @@ final class HCI_Import {
             return $result;
         }
         $payload = $fresh['payload'];
+        self::heartbeat();
 
         try {
             $product = $existing_dest_id > 0 ? wc_get_product($existing_dest_id) : false;
@@ -492,6 +548,7 @@ final class HCI_Import {
                 ? self::save_variable_product($product, $payload, $dest_sku)
                 : self::save_simple_product($product, $payload, $dest_sku, $simple_price_missing);
             self::log_step($source_product_id, 'save', $t_save, $t0);
+            self::heartbeat();
 
             // برای دکمه «ریست داده‌ها»: محصولی که این پلاگین می‌سازد (حتی اگر
             // بعداً Partial/Error بماند) باید همیشه قابل شناسایی باشد تا
@@ -595,7 +652,7 @@ final class HCI_Import {
         if ($featured_url) {
             $attachment_id = self::get_or_sideload_image((string) $featured_url);
             if ($attachment_id <= 0) {
-                return 'دانلود تصویر اصلی (Featured) ناموفق بود.';
+                return 'دانلود تصویر اصلی محصول ناموفق بود.';
             }
             $product->set_image_id($attachment_id);
         }
@@ -682,7 +739,7 @@ final class HCI_Import {
      * @return array{ids:int[],total:int,failed:int,unknown_stock:int}
      */
     private static function save_variations(int $parent_id, int $parent_source_id, array $variations): array {
-        $summary = array('ids' => array(), 'total' => 0, 'failed' => 0, 'unknown_stock' => 0, 'no_price' => 0);
+        $summary = array('ids' => array(), 'total' => 0, 'failed' => 0, 'unknown_stock' => 0, 'no_price' => 0, 'failed_labels' => array());
 
         foreach ($variations as $variation_payload) {
             $source_variation_id = (int) ($variation_payload['variation_id'] ?? 0);
@@ -690,6 +747,7 @@ final class HCI_Import {
                 continue;
             }
             $summary['total']++;
+            self::heartbeat();
 
             try {
                 $existing_map = HCI_DB::get_map_row($parent_source_id, $source_variation_id);
@@ -757,11 +815,23 @@ final class HCI_Import {
                 $summary['ids'][] = $saved_dest_variation_id;
             } catch (Throwable $e) {
                 $summary['failed']++;
+                $summary['failed_labels'][] = self::variation_label($variation_payload);
                 error_log('[HCI Import] variation ' . $source_variation_id . ' failed: ' . $e->getMessage());
             }
         }
 
         return $summary;
+    }
+
+    private static function variation_label(array $variation_payload): string {
+        $options = array();
+        foreach ((array) ($variation_payload['attributes'] ?? array()) as $attr) {
+            $option = trim((string) ($attr['option'] ?? ''));
+            if ($option !== '') {
+                $options[] = $option;
+            }
+        }
+        return $options ? implode(' / ', $options) : ('شماره ' . (int) ($variation_payload['variation_id'] ?? 0));
     }
 
     /**
@@ -771,8 +841,15 @@ final class HCI_Import {
         if ($summary['no_price'] > 0) {
             return 'قیمت یک یا چند تنوع این محصول در هی‌مد مشخص نیست؛ آن تنوع‌ها ساخته نشدند.';
         }
-        if ($summary['total'] === 0 || $summary['failed'] > 0 || count($summary['ids']) < $summary['total']) {
-            return 'تنوع‌های محصول ساخته نشد.';
+        if ($summary['total'] === 0) {
+            return 'برای این محصول در هی‌مد هیچ تنوعی پیدا نشد.';
+        }
+        if ($summary['failed'] > 0 || count($summary['ids']) < $summary['total']) {
+            $labels = array_map(static fn (string $l): string => '«' . $l . '»', array_slice($summary['failed_labels'], 0, 5));
+            $more = count($summary['failed_labels']) > 5 ? ' و چند مورد دیگر' : '';
+            return $labels
+                ? 'این تنوع‌ها ساخته نشدند: ' . implode('، ', $labels) . $more . '. دوباره تلاش کنید.'
+                : 'ساخت بعضی تنوع‌ها ناموفق بود. دوباره تلاش کنید.';
         }
         if ($summary['unknown_stock'] > 0) {
             return 'موجودی تنوع‌های این محصول از هی‌مد مشخص نیست؛ لازم است پشتیبانی یک همگام‌سازی کامل در هی‌مد انجام دهد.';

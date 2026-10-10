@@ -1072,6 +1072,13 @@ final class HCI_Products {
                 span.textContent = info.text;
                 if (message) { span.title = message; }
                 cell.appendChild(span);
+                if (message && statusKey !== 'imported') {
+                    const note = document.createElement('div');
+                    note.className = 'hci-status-msg';
+                    note.style.cssText = 'font-size:11px;color:#50575e;margin-top:2px;max-width:260px';
+                    note.textContent = message;
+                    cell.appendChild(note);
+                }
             }
 
             function markQueuedUI(id) {
@@ -1292,6 +1299,10 @@ final class HCI_Products {
         }
         [$label, $color] = $map[$status];
         $title = $message !== '' ? ' title="' . esc_attr($message) . '"' : '';
-        return '<span style="color:' . esc_attr($color) . ';font-weight:bold"' . $title . '>' . esc_html($label) . '</span>';
+        // علت مشکل مستقیم در خود ردیف دیده شود (نه فقط با Hover).
+        $visible = $message !== '' && $status !== HCI_DB::STATUS_IMPORTED
+            ? '<div class="hci-status-msg" style="font-size:11px;color:#50575e;margin-top:2px;max-width:260px">' . esc_html($message) . '</div>'
+            : '';
+        return '<span style="color:' . esc_attr($color) . ';font-weight:bold"' . $title . '>' . esc_html($label) . '</span>' . $visible;
     }
 }

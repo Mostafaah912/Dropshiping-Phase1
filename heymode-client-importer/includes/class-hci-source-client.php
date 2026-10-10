@@ -198,6 +198,33 @@ final class HCI_Source_Client {
         return array('success' => true, 'items' => $items);
     }
 
+    /**
+     * وضعیت تازه‌ی یک محصول از مبدا (قیمت/موجودی/تنوع‌ها) — فقط یک درخواست
+     * کوچک برای همان یک محصول، برای لحظه‌ی Import.
+     *
+     * @return array{success:bool,configured:bool,not_found:bool,item:?array,message:string}
+     */
+    public static function get_product(int $source_product_id): array {
+        $api_url = trim((string) get_option('hci_api_url', ''));
+        $api_key = trim((string) get_option('hci_api_key', ''));
+        if ($api_url === '' || $api_key === '') {
+            return array('success' => false, 'configured' => false, 'not_found' => false, 'item' => null, 'message' => '');
+        }
+        $url = rtrim($api_url, '/') . '/products/' . $source_product_id;
+        $result = self::request_json_with_retry($url, $api_key, 15);
+        if (!$result['success']) {
+            return array(
+                'success' => false,
+                'configured' => true,
+                'not_found' => ($result['status'] ?? 0) === 404,
+                'item' => null,
+                'message' => (string) ($result['message'] ?? ''),
+            );
+        }
+        $item = is_array($result['data']) ? $result['data'] : null;
+        return array('success' => $item !== null, 'configured' => true, 'not_found' => false, 'item' => $item, 'message' => '');
+    }
+
     private static function fetch_products_page_with_retry(string $api_url, string $api_key, int $page): array {
         $url = add_query_arg(array(
             'page' => $page,

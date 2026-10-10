@@ -153,6 +153,7 @@ final class HCI_Sync {
         $summary = get_option(self::SUMMARY_OPTION, null);
         $next_run = function_exists('as_next_scheduled_action') ? as_next_scheduled_action(self::SLOT_HOOK, array(), self::GROUP) : false;
         $last_ts = $cursor !== '' ? strtotime($cursor . ' UTC') : false;
+        HCI_DB::reconcile_removed_throttled();
         $imported_count = count(HCI_DB::get_imported_parent_rows());
         ?>
         <div class="wrap">
@@ -245,6 +246,8 @@ final class HCI_Sync {
             ), false);
         }
 
+        // محصول پاک/Trash‌شده توسط مشتری نباید در شمارش و اعمال سینک بماند.
+        HCI_DB::reconcile_removed();
         $imported_parents = HCI_DB::get_imported_parent_rows();
         $parent_by_source_id = array();
         foreach ($imported_parents as $prow) {

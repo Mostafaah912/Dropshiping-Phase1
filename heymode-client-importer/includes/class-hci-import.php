@@ -22,6 +22,18 @@ final class HCI_Import {
         add_action('wp_ajax_hci_poll_import_status', array(__CLASS__, 'ajax_poll_import_status'));
         add_action('wp_ajax_hci_import_next', array(__CLASS__, 'ajax_import_next'));
         add_action('wp_ajax_hci_repair_variations', array(__CLASS__, 'ajax_repair_variations'));
+        // محصولی که مشتری از ووکامرس پاک/Trash می‌کند از شمارش و سینک خارج می‌شود.
+        add_action('wp_trash_post', array(__CLASS__, 'on_post_removed'));
+        add_action('before_delete_post', array(__CLASS__, 'on_post_removed'));
+        add_action('untrashed_post', array(__CLASS__, 'on_post_restored'));
+    }
+
+    public static function on_post_removed($post_id): void {
+        HCI_DB::mark_removed_by_dest_id((int) $post_id);
+    }
+
+    public static function on_post_restored($post_id): void {
+        HCI_DB::restore_removed_by_dest_id((int) $post_id);
     }
 
     // =========================================================================
@@ -103,6 +115,9 @@ final class HCI_Import {
         if ($existing_row && $existing_row['import_status'] === HCI_DB::STATUS_IMPORTED) {
             return array('success' => false, 'message' => 'این محصول قبلاً Import شده است.', 'duplicate' => true);
         }
+
+        // محصولی که مشتری قبلاً پاکش کرده، از صفر و با محصول تازه ساخته می‌شود.
+        HCI_DB::forget_removed($source_product_id);
 
         $sanitized = self::sanitize_payload($decoded);
         $queue = HCI_DB::queue_import($source_product_id, $source_sku, (string) wp_json_encode($sanitized, JSON_UNESCAPED_UNICODE));
@@ -433,6 +448,17 @@ final class HCI_Import {
             return $result;
         }
 
+        // قیمت/موجودی/تنوع‌ها همین الان تازه از مبدا گرفته می‌شود (نه از
+        // اسنپ‌شات مرورگر که ممکن است ساعت‌ها قدیمی باشد)؛ نام/توضیح/تصاویر/
+        // دسته از ویرایش کارمند می‌ماند.
+        $fresh = self::refresh_payload_from_source($payload, $source_product_id);
+        if (isset($fresh['error_message'])) {
+            $result = array('import_status' => HCI_DB::STATUS_ERROR, 'error_message' => $fresh['error_message']);
+            HCI_DB::save_import_result($source_product_id, $result);
+            return $result;
+        }
+        $payload = $fresh['payload'];
+
         try {
             $product = $existing_dest_id > 0 ? wc_get_product($existing_dest_id) : false;
             if (!$product) {
@@ -461,9 +487,10 @@ final class HCI_Import {
             self::log_step($source_product_id, 'images', $t_img, $t0);
 
             $t_save = microtime(true);
+            $simple_price_missing = false;
             $parent_id = ($product_type === 'variable')
                 ? self::save_variable_product($product, $payload, $dest_sku)
-                : self::save_simple_product($product, $payload, $dest_sku);
+                : self::save_simple_product($product, $payload, $dest_sku, $simple_price_missing);
             self::log_step($source_product_id, 'save', $t_save, $t0);
 
             // برای دکمه «ریست داده‌ها»: محصولی که این پلاگین می‌سازد (حتی اگر
@@ -485,7 +512,8 @@ final class HCI_Import {
                 $variation_problem = self::variation_problem_message($summary);
             }
 
-            $problem = trim(implode(' ', array_filter(array($image_error, $variation_problem))));
+            $price_problem = $simple_price_missing ? 'قیمت این محصول در هی‌مد مشخص نیست؛ بعد از تعیین قیمت در هی‌مد دوباره تلاش کنید.' : null;
+            $problem = trim(implode(' ', array_filter(array($price_problem, $image_error, $variation_problem))));
             if ($problem !== '') {
                 $result = array(
                     'dest_product_id' => $parent_id,
@@ -516,6 +544,27 @@ final class HCI_Import {
             HCI_DB::save_import_result($source_product_id, $result);
             return $result;
         }
+    }
+
+    /**
+     * @return array{payload:array}|array{error_message:string}
+     */
+    private static function refresh_payload_from_source(array $payload, int $source_product_id): array {
+        $fresh = HCI_Source_Client::get_product($source_product_id);
+        if (empty($fresh['configured'])) {
+            return array('payload' => $payload); // اتصال تنظیم نشده؛ همان اسنپ‌شات
+        }
+        if (!empty($fresh['not_found'])) {
+            return array('error_message' => 'این محصول دیگر در هی‌مد فروخته نمی‌شود، برای همین وارد نشد.');
+        }
+        if (empty($fresh['success'])) {
+            return array('error_message' => 'ارتباط با هی‌مد برای گرفتن قیمت و موجودی تازه برقرار نشد. کمی بعد دوباره تلاش کنید.');
+        }
+        $clean = self::sanitize_payload((array) $fresh['item']);
+        foreach (array('price', 'stock_quantity', 'stock_status', 'variations') as $field) {
+            $payload[$field] = $clean[$field];
+        }
+        return array('payload' => $payload);
     }
 
     /**
@@ -567,14 +616,20 @@ final class HCI_Import {
         return null;
     }
 
-    private static function save_simple_product(WC_Product $product, array $payload, ?string $dest_sku): int {
+    private static function save_simple_product(WC_Product $product, array $payload, ?string $dest_sku, bool &$price_missing = false): int {
         if ($dest_sku !== null) {
             $product->set_sku($dest_sku);
         }
 
+        // قیمت خالی در مبدا ⇒ قیمتی ثبت نمی‌شود (نه ۰)؛ محصول partial می‌ماند.
         $final_price = self::resolved_price($payload['price'] ?? null);
-        $product->set_regular_price((string) $final_price);
-        $product->set_price((string) $final_price);
+        if ($final_price === null) {
+            $price_missing = true;
+        } else {
+            $price_missing = false;
+            $product->set_regular_price((string) $final_price);
+            $product->set_price((string) $final_price);
+        }
 
         self::apply_stock($product, $payload['stock_quantity'] ?? null, $payload['stock_status'] ?? null);
 
@@ -627,7 +682,7 @@ final class HCI_Import {
      * @return array{ids:int[],total:int,failed:int,unknown_stock:int}
      */
     private static function save_variations(int $parent_id, int $parent_source_id, array $variations): array {
-        $summary = array('ids' => array(), 'total' => 0, 'failed' => 0, 'unknown_stock' => 0);
+        $summary = array('ids' => array(), 'total' => 0, 'failed' => 0, 'unknown_stock' => 0, 'no_price' => 0);
 
         foreach ($variations as $variation_payload) {
             $source_variation_id = (int) ($variation_payload['variation_id'] ?? 0);
@@ -662,6 +717,11 @@ final class HCI_Import {
                 $variation_product->set_attributes($attributes_meta);
 
                 $final_price = self::resolved_price($variation_payload['price'] ?? null);
+                if ($final_price === null) {
+                    // تنوع بدون قیمت با قیمت ۰ ساخته نمی‌شود.
+                    $summary['no_price']++;
+                    continue;
+                }
                 $variation_product->set_regular_price((string) $final_price);
                 $variation_product->set_price((string) $final_price);
 
@@ -708,6 +768,9 @@ final class HCI_Import {
      * پیام ساده فارسی برای مشکل تنوع‌ها (یا null اگر همه‌چیز درست است).
      */
     private static function variation_problem_message(array $summary): ?string {
+        if ($summary['no_price'] > 0) {
+            return 'قیمت یک یا چند تنوع این محصول در هی‌مد مشخص نیست؛ آن تنوع‌ها ساخته نشدند.';
+        }
         if ($summary['total'] === 0 || $summary['failed'] > 0 || count($summary['ids']) < $summary['total']) {
             return 'تنوع‌های محصول ساخته نشد.';
         }
@@ -747,9 +810,9 @@ final class HCI_Import {
         }
     }
 
-    private static function resolved_price($raw_price): float {
+    private static function resolved_price($raw_price): ?float {
         if ($raw_price === null || $raw_price === '') {
-            return 0.0;
+            return null;
         }
         return HCI_Pricing::resolve_price((float) $raw_price);
     }

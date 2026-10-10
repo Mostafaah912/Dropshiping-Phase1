@@ -9,6 +9,8 @@ final class HCI_DB {
     public const STATUS_DUPLICATE = 'duplicate';
     public const STATUS_PARTIAL = 'partial';
     public const STATUS_ERROR = 'error';
+    // محصولی که مشتری بعداً از ووکامرس پاک/Trash کرده؛ از شمارش و سینک خارج و گرید آزاد است.
+    public const STATUS_REMOVED = 'removed';
 
     public static function product_map_table(): string {
         global $wpdb;
@@ -385,6 +387,113 @@ final class HCI_DB {
             $grouped[(int) $row['source_product_id']][] = $row;
         }
         return $grouped;
+    }
+
+    /**
+     * محصول (یا تنوع) مقصد پاک/Trash شده: ردیف‌های ردیابی‌اش را removed می‌کند.
+     * برای والد، تنوع‌هایش هم removed می‌شوند. خروجی: تعداد ردیف‌های تغییرکرده.
+     */
+    public static function mark_removed_by_dest_id(int $dest_id): int {
+        return self::transition_by_dest_id($dest_id, self::STATUS_IMPORTED, self::STATUS_REMOVED);
+    }
+
+    /**
+     * محصول از Trash برگشت: ردیف‌های removed همان محصول دوباره imported می‌شوند.
+     */
+    public static function restore_removed_by_dest_id(int $dest_id): int {
+        return self::transition_by_dest_id($dest_id, self::STATUS_REMOVED, self::STATUS_IMPORTED);
+    }
+
+    private static function transition_by_dest_id(int $dest_id, string $from, string $to): int {
+        global $wpdb;
+        if ($dest_id <= 0) {
+            return 0;
+        }
+        $table = self::product_map_table();
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT id, source_product_id, source_variation_id FROM {$table} WHERE import_status = %s AND ((source_variation_id IS NULL AND dest_product_id = %d) OR dest_variation_id = %d)",
+            $from,
+            $dest_id,
+            $dest_id
+        ), ARRAY_A);
+        $changed = 0;
+        $now = current_time('mysql', true);
+        foreach ((array) $rows as $row) {
+            if ($row['source_variation_id'] === null) {
+                $changed += (int) $wpdb->query($wpdb->prepare(
+                    "UPDATE {$table} SET import_status = %s, updated_at = %s WHERE source_product_id = %d AND import_status = %s",
+                    $to,
+                    $now,
+                    (int) $row['source_product_id'],
+                    $from
+                ));
+            } else {
+                $changed += (int) $wpdb->query($wpdb->prepare(
+                    "UPDATE {$table} SET import_status = %s, updated_at = %s WHERE id = %d AND import_status = %s",
+                    $to,
+                    $now,
+                    (int) $row['id'],
+                    $from
+                ));
+            }
+        }
+        return $changed;
+    }
+
+    /**
+     * بررسی وجود: محصولات imported که در ووکامرس دیگر نیستند (حذف همیشگی بدون
+     * هوک، یا Trash) removed می‌شوند. خروجی: تعداد رویدادهای حذف.
+     */
+    public static function reconcile_removed(): int {
+        global $wpdb;
+        $table = self::product_map_table();
+        $rows = $wpdb->get_results(
+            "SELECT source_variation_id, dest_product_id, dest_variation_id FROM {$table} WHERE import_status = 'imported' AND ((source_variation_id IS NULL AND dest_product_id IS NOT NULL) OR dest_variation_id IS NOT NULL) ORDER BY (source_variation_id IS NULL) DESC, id ASC",
+            ARRAY_A
+        );
+        $events = 0;
+        foreach ((array) $rows as $row) {
+            $id = $row['source_variation_id'] === null ? (int) $row['dest_product_id'] : (int) $row['dest_variation_id'];
+            $status = get_post_status($id);
+            if ($status === false || $status === 'trash') {
+                if (self::mark_removed_by_dest_id($id) > 0) {
+                    $events++;
+                }
+            }
+        }
+        return $events;
+    }
+
+    /**
+     * همان reconcile_removed ولی حداکثر هر $seconds ثانیه یک‌بار (برای رندر صفحه‌ها).
+     */
+    public static function reconcile_removed_throttled(int $seconds = 300): void {
+        if (get_transient('hci_reconcile_removed_ts') !== false) {
+            return;
+        }
+        set_transient('hci_reconcile_removed_ts', 1, $seconds);
+        self::reconcile_removed();
+    }
+
+    /**
+     * قبل از Import دوباره‌ی یک محصول removed: شناسه‌های مرده‌ی مقصد و ردیف
+     * تنوع‌ها پاک می‌شوند تا محصول تازه ساخته شود.
+     */
+    public static function forget_removed(int $source_product_id): void {
+        global $wpdb;
+        $table = self::product_map_table();
+        $row = self::get_map_row($source_product_id);
+        if (!$row || $row['import_status'] !== self::STATUS_REMOVED) {
+            return;
+        }
+        $wpdb->query($wpdb->prepare(
+            "DELETE FROM {$table} WHERE source_product_id = %d AND source_variation_id IS NOT NULL",
+            $source_product_id
+        ));
+        $wpdb->query($wpdb->prepare(
+            "UPDATE {$table} SET dest_product_id = NULL, dest_sku = NULL WHERE id = %d",
+            (int) $row['id']
+        ));
     }
 
     /**

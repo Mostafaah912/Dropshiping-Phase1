@@ -711,6 +711,10 @@ function wc_get_product(int $id) {
     return new $class($id);
 }
 
+function get_post_status($id) {
+    return $GLOBALS['__fake_wc_products'][(int) $id]['data']['status'] ?? false;
+}
+
 function wc_get_product_id_by_sku(string $sku): int {
     return (int) ($GLOBALS['__fake_wc_sku_index'][$sku] ?? 0);
 }

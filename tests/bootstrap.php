@@ -604,6 +604,7 @@ function hci_test_reset_wc_fakes(): void {
     $GLOBALS['__fake_wc_synced_parents'] = array();
     $GLOBALS['__fake_wc_cleared_transients'] = array();
     $GLOBALS['__fake_wc_variation_save_throws'] = false;
+    $GLOBALS['__fake_wp_insert_term_fail'] = array();
 }
 
 class WC_Product {
@@ -742,16 +743,48 @@ function wc_get_product_id_by_sku(string $sku): int {
     return (int) ($GLOBALS['__fake_wc_sku_index'][$sku] ?? 0);
 }
 
+/**
+ * وفادار به وردپرس واقعی: term_exists() قید Parent را فقط وقتی parent > 0 باشد
+ * اعمال می‌کند (برای ۰/null با هر Parentی تطبیق می‌خورد) و اول با Slug می‌گردد.
+ */
 function term_exists($term, string $taxonomy = '', $parent = null) {
-    foreach ($GLOBALS['__fake_wc_terms'][$taxonomy] ?? array() as $term_id => $t) {
-        if ($t['name'] === $term && (int) $t['parent'] === (int) ($parent ?? 0)) {
+    $terms = $GLOBALS['__fake_wc_terms'][$taxonomy] ?? array();
+    $parent_id = (int) ($parent ?? 0);
+    foreach ($terms as $term_id => $t) {
+        if ($t['slug'] === sanitize_title((string) $term) && ($parent_id === 0 || (int) $t['parent'] === $parent_id)) {
+            return array('term_id' => $term_id, 'term_taxonomy_id' => $term_id);
+        }
+    }
+    foreach ($terms as $term_id => $t) {
+        if ($t['name'] === $term && ($parent_id === 0 || (int) $t['parent'] === $parent_id)) {
             return array('term_id' => $term_id, 'term_taxonomy_id' => $term_id);
         }
     }
     return null;
 }
 
+function get_terms($args = array()) {
+    $taxonomy = (string) ($args['taxonomy'] ?? '');
+    $out = array();
+    foreach ($GLOBALS['__fake_wc_terms'][$taxonomy] ?? array() as $term_id => $t) {
+        if (isset($args['parent']) && $args['parent'] !== '' && (int) $t['parent'] !== (int) $args['parent']) {
+            continue;
+        }
+        if (isset($args['name']) && $t['name'] !== $args['name']) {
+            continue;
+        }
+        $out[] = $term_id;
+        if (!empty($args['number']) && count($out) >= (int) $args['number']) {
+            break;
+        }
+    }
+    return $out;
+}
+
 function wp_insert_term(string $term, string $taxonomy = '', array $args = array()) {
+    if (in_array($term, $GLOBALS['__fake_wp_insert_term_fail'] ?? array(), true)) {
+        return new WP_Error('db_insert_error', 'شبیه‌سازی خطای ساخت دسته');
+    }
     $term_id = $GLOBALS['__fake_wc_next_term_id']++;
     // مثل وردپرس واقعی: اگر Slug صریح داده نشده، از روی نام ساخته می‌شود؛
     // و اگر آن Slug (صریح یا خودکار) در همین Taxonomy قبلاً گرفته شده،

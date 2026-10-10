@@ -264,9 +264,8 @@ final class HCI_Import {
      * source_id → dest_term_id، هر Node دقیقاً زیر همان Parentی ساخته
      * می‌شود که واقعاً در مبدا داشته.
      *
-     * تطبیق دسته موجود همچنان «نام دقیق + Parent» است (نه Slug) —
-     * term_exists($name, $tax, $dest_parent_id) خودِ وردپرس این را تضمین
-     * می‌کند. Slug فقط برای Termهای *جدید* استفاده می‌شود (همان‌طور که در
+     * تطبیق دسته موجود «نام دقیق + Parent» است (find_category_term با get_terms؛
+     * term_exists برای ریشه قید Parent را نادیده می‌گیرد). Slug فقط برای Termهای *جدید* استفاده می‌شود (همان‌طور که در
      * مبدا ذخیره شده)؛ اگر مبدا Slug نداد (نسخه قدیمی‌تر heymode-wholesale)
      * یا در مقصد قبلاً گرفته شده باشد، وردپرس خودش از روی نام یک Slug
      * یکتا می‌سازد — نیازی به منطق اضافه اینجا نیست.
@@ -274,8 +273,21 @@ final class HCI_Import {
      * @param array $category_path آرایه‌ی ریشه→برگ از {id, name, slug, parent_id}
      */
     public static function resolve_category_hierarchy(array $category_path): array {
+        return self::resolve_category_hierarchy_checked($category_path)['ids'];
+    }
+
+    /**
+     * مثل resolve_category_hierarchy ولی خطا را هم برمی‌گرداند: اگر ساخت یک
+     * دسته شکست بخورد، فرزندانش هرگز زیر والد اشتباه (ریشه/والد بالاتر) ساخته
+     * نمی‌شوند و محصول به هیچ دسته‌ای (مثلاً دسته‌ی والد) داده نمی‌شود.
+     *
+     * @return array{ids:int[],error:?string}
+     */
+    public static function resolve_category_hierarchy_checked(array $category_path): array {
         $dest_term_id_by_source_id = array();
         $leaf_term_id = 0;
+        $failed_names = array();
+        $failed_source_ids = array();
 
         foreach ($category_path as $node) {
             $name = trim((string) ($node['name'] ?? ''));
@@ -284,16 +296,19 @@ final class HCI_Import {
             }
             $source_id = (int) ($node['id'] ?? 0);
             $source_parent_id = isset($node['parent_id']) ? (int) $node['parent_id'] : 0;
-            $dest_parent_id = ($source_parent_id > 0 && isset($dest_term_id_by_source_id[$source_parent_id]))
-                ? $dest_term_id_by_source_id[$source_parent_id]
-                : 0;
 
-            $existing = term_exists($name, 'product_cat', $dest_parent_id);
-            if (is_array($existing) && !empty($existing['term_id'])) {
-                $term_id = (int) $existing['term_id'];
-            } elseif (is_numeric($existing) && (int) $existing > 0) {
-                $term_id = (int) $existing;
-            } else {
+            if ($source_parent_id > 0 && !isset($dest_term_id_by_source_id[$source_parent_id])) {
+                // والدِ این دسته ساخته/پیدا نشد؛ به‌جای ساختن زیر ریشه، رد می‌شود.
+                $failed_names[] = $name;
+                if ($source_id > 0) {
+                    $failed_source_ids[$source_id] = true;
+                }
+                continue;
+            }
+            $dest_parent_id = $source_parent_id > 0 ? $dest_term_id_by_source_id[$source_parent_id] : 0;
+
+            $term_id = self::find_category_term($name, $dest_parent_id);
+            if ($term_id <= 0) {
                 $insert_args = array('parent' => $dest_parent_id);
                 $slug = trim((string) ($node['slug'] ?? ''));
                 if ($slug !== '') {
@@ -301,6 +316,10 @@ final class HCI_Import {
                 }
                 $inserted = wp_insert_term($name, 'product_cat', $insert_args);
                 if (is_wp_error($inserted)) {
+                    $failed_names[] = $name;
+                    if ($source_id > 0) {
+                        $failed_source_ids[$source_id] = true;
+                    }
                     continue;
                 }
                 $term_id = (int) $inserted['term_id'];
@@ -312,7 +331,32 @@ final class HCI_Import {
             $leaf_term_id = $term_id;
         }
 
-        return $leaf_term_id > 0 ? array($leaf_term_id) : array();
+        if ($failed_names) {
+            return array(
+                'ids' => array(),
+                'error' => 'ساخت دسته‌بندی «' . implode('، ', array_slice($failed_names, 0, 3)) . '» ناموفق بود؛ محصول بدون دسته‌بندی ماند. دوباره تلاش کنید.',
+            );
+        }
+        return array('ids' => $leaf_term_id > 0 ? array($leaf_term_id) : array(), 'error' => null);
+    }
+
+    /**
+     * تطبیق واقعی «نام دقیق + Parent» (term_exists برای ریشه قید Parent را
+     * نادیده می‌گیرد و اول با Slug می‌گردد؛ پس استفاده نمی‌شود).
+     */
+    private static function find_category_term(string $name, int $parent_id): int {
+        $found = get_terms(array(
+            'taxonomy' => 'product_cat',
+            'hide_empty' => false,
+            'parent' => $parent_id,
+            'name' => $name,
+            'number' => 1,
+            'fields' => 'ids',
+        ));
+        if (is_wp_error($found) || !is_array($found) || empty($found)) {
+            return 0;
+        }
+        return (int) $found[0];
     }
 
     /**
@@ -528,12 +572,15 @@ final class HCI_Import {
             $product->set_short_description((string) ($payload['short_description'] ?? ''));
 
             $t_cat = microtime(true);
+            $category_error = null;
             if (self::should_apply_categories()) {
-                $category_ids = self::resolve_category_hierarchy((array) ($payload['category_path'] ?? array()));
-                if ($category_ids) {
-                    $product->set_category_ids($category_ids);
+                $resolved = self::resolve_category_hierarchy_checked((array) ($payload['category_path'] ?? array()));
+                $category_error = $resolved['error'];
+                if ($resolved['ids']) {
+                    $product->set_category_ids($resolved['ids']);
                 }
             }
+            self::heartbeat();
             // اگر تنظیم «خیر» باشد، set_category_ids() اصلاً صدا زده نمی‌شود —
             // محصول همان دسته پیش‌فرض ووکامرس (Uncategorized) را می‌گیرد.
             self::log_step($source_product_id, 'categories', $t_cat, $t0);
@@ -570,7 +617,7 @@ final class HCI_Import {
             }
 
             $price_problem = $simple_price_missing ? 'قیمت این محصول در هی‌مد مشخص نیست؛ بعد از تعیین قیمت در هی‌مد دوباره تلاش کنید.' : null;
-            $problem = trim(implode(' ', array_filter(array($price_problem, $image_error, $variation_problem))));
+            $problem = trim(implode(' ', array_filter(array($price_problem, $category_error, $image_error, $variation_problem))));
             if ($problem !== '') {
                 $result = array(
                     'dest_product_id' => $parent_id,

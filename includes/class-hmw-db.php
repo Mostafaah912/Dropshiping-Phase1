@@ -13,6 +13,19 @@ final class HMW_DB {
         return $wpdb->prefix . 'hmw_sync_logs';
     }
 
+    /**
+     * چند Full Sync آخر (جدیدترین اول) برای ریشه‌یابی سینک.
+     * @return array<int,array<string,mixed>>
+     */
+    public static function get_recent_full_syncs(int $limit = 10): array {
+        global $wpdb;
+        $rows = $wpdb->get_results($wpdb->prepare(
+            'SELECT sync_type, trigger_type, status, started_at, finished_at, products_fetched, products_updated, products_deactivated, errors_count, error_summary FROM ' . self::sync_logs_table() . " WHERE sync_type = 'full' ORDER BY id DESC LIMIT %d",
+            max(1, $limit)
+        ), ARRAY_A);
+        return is_array($rows) ? $rows : array();
+    }
+
     public static function create_tables(): void {
         global $wpdb;
         require_once ABSPATH . 'wp-admin/includes/upgrade.php';

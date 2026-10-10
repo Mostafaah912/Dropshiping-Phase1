@@ -13,6 +13,8 @@ final class HCI_Sync {
     private const CURSOR_OPTION = 'hci_sync_cursor_gmt';
     private const RETRY_COUNT_OPTION = 'hci_sync_retry_count';
     private const SUMMARY_OPTION = 'hci_last_sync_summary';
+    private const HISTORY_OPTION = 'hci_sync_history';
+    private const HISTORY_LIMIT = 30;
     private const TIMEZONE = 'Asia/Tehran';
 
     public static function init(): void {
@@ -65,7 +67,7 @@ final class HCI_Sync {
             as_schedule_single_action(self::next_slot_timestamp($now), self::SLOT_HOOK, array(), self::GROUP);
         }
         update_option(self::RETRY_COUNT_OPTION, 0, false);
-        return self::run_daily_sync(false);
+        return self::run_daily_sync(false, 'scheduled');
     }
 
     public static function admin_menu(): void {
@@ -199,6 +201,7 @@ final class HCI_Sync {
                 <p>این بخش فقط برای پشتیبان فنی است. جزئیات (زمان دقیق به وقت جهانی، اجرای خودکار با سرور) در فایل README پلاگین آمده است.</p>
                 <p>آخرین نقطه هماهنگی موفق: <?php echo $cursor !== '' ? esc_html($cursor) . ' UTC' : '-'; ?></p>
                 <pre style="background:#f6f7f7;padding:8px;overflow:auto">0 6 * * * cd /path/to/wordpress && wp hci sync --quiet</pre>
+                <?php self::render_history_table(); ?>
             </div>
             <script>
             document.getElementById('hci-adv-link').addEventListener('click', function (e) {
@@ -211,12 +214,52 @@ final class HCI_Sync {
         <?php
     }
 
+    private static function render_history_table(): void {
+        $history = self::get_history();
+        $kinds = array('scheduled' => 'خودکار ۰۶:۰۰', 'retry' => 'تلاش مجدد', 'manual' => 'دستی');
+        $tz = new DateTimeZone(self::TIMEZONE);
+        $fmt = static function ($utc) use ($tz): string {
+            $ts = is_string($utc) && $utc !== '' ? strtotime($utc . ' UTC') : false;
+            return $ts ? (new DateTimeImmutable('@' . $ts))->setTimezone($tz)->format('Y-m-d H:i:s') : '-';
+        };
+        ?>
+        <h3 style="margin-top:16px">۳۰ اجرای آخر (وقت تهران)</h3>
+        <table class="widefat striped" id="hci-history-table" style="font-size:11px">
+            <thead><tr><th>شروع</th><th>پایان</th><th>نوع</th><th>نتیجه</th><th>بررسی‌شده</th><th>قیمت</th><th>موجودی</th><th>ناموجود</th><th>خطا</th><th>Cursor جلو رفت؟</th><th>پیام</th></tr></thead>
+            <tbody>
+            <?php if (!$history) : ?>
+                <tr><td colspan="11">هنوز اجرایی ثبت نشده است.</td></tr>
+            <?php endif; ?>
+            <?php foreach ($history as $row) : ?>
+                <tr>
+                    <td><?php echo esc_html($fmt($row['started_at'] ?? '')); ?></td>
+                    <td><?php echo esc_html($fmt($row['finished_at'] ?? '')); ?></td>
+                    <td><?php echo esc_html($kinds[$row['kind'] ?? ''] ?? '-'); ?></td>
+                    <td><?php echo !empty($row['success']) ? 'موفق' : 'ناموفق'; ?></td>
+                    <td><?php echo esc_html((string) (int) ($row['checked'] ?? 0)); ?></td>
+                    <td><?php echo esc_html((string) (int) ($row['price_updated'] ?? 0)); ?></td>
+                    <td><?php echo esc_html((string) (int) ($row['stock_updated'] ?? 0)); ?></td>
+                    <td><?php echo esc_html((string) (int) ($row['deactivated'] ?? 0)); ?></td>
+                    <td><?php echo esc_html((string) (int) ($row['errors'] ?? 0)); ?></td>
+                    <td><?php echo !empty($row['cursor_advanced']) ? 'بله' : 'خیر'; ?></td>
+                    <td><?php echo esc_html(trim((string) ($row['message'] ?? '') . ' ' . implode(' | ', (array) ($row['error_samples'] ?? array())))); ?></td>
+                </tr>
+            <?php endforeach; ?>
+            </tbody>
+        </table>
+        <?php
+    }
+
     /**
      * موتور اصلی سینک — چه با Cron روزانه صدا زده شود چه دستی (Sync Now).
      * فقط قیمت/موجودی محصولات از قبل Import‌شده (طبق wp_hci_product_map) را
      * به‌روز می‌کند؛ هیچ محصول جدیدی هرگز اینجا ساخته نمی‌شود.
      */
-    public static function run_daily_sync(bool $manual = false): array {
+    public static function run_daily_sync(bool $manual = false, string $kind = ''): array {
+        if ($kind === '') {
+            // اجرای Action Scheduler روی DAILY_HOOK یعنی Retry؛ WP-CLI/دکمه دستی manual است.
+            $kind = $manual ? 'manual' : 'retry';
+        }
         // Cursor از «قبل از شروع درخواست» گرفته می‌شود، نه بعد از پایان —
         // وگرنه تغییراتی که دقیقاً حین اجرای این درخواست در منبع رخ می‌دهند
         // (بین لحظه‌ی شروع و پایان) هرگز در Delta بعدی نمی‌آمدند.
@@ -243,6 +286,10 @@ final class HCI_Sync {
                 'deactivated' => 0,
                 'errors' => 1,
                 'message' => 'دریافت تغییرات از منبع ناموفق بود: ' . ($result['message'] ?? ''),
+                'kind' => $kind,
+                'cursor_before' => $cursor,
+                'cursor_advanced' => false,
+                'error_samples' => array(),
             ), false);
         }
 
@@ -260,6 +307,12 @@ final class HCI_Sync {
         $stock_updated = 0;
         $deactivated = 0;
         $errors = 0;
+        $error_samples = array();
+        $note = static function (Throwable $e) use (&$error_samples): void {
+            if (count($error_samples) < 5) {
+                $error_samples[] = mb_substr($e->getMessage(), 0, 200);
+            }
+        };
 
         foreach ((array) $result['items'] as $item) {
             $source_id = (int) ($item['source_product_id'] ?? 0);
@@ -280,6 +333,7 @@ final class HCI_Sync {
                         $deactivated += self::deactivate_variable_family($parent_row, $variation_rows) ? 1 : 0;
                     } catch (Throwable $e) {
                         $errors++;
+                        $note($e);
                     }
                     continue;
                 }
@@ -304,6 +358,7 @@ final class HCI_Sync {
                         $deactivated += $outcome['deactivated'] ? 1 : 0;
                     } catch (Throwable $e) {
                         $errors++;
+                        $note($e);
                     }
                 }
             }
@@ -328,6 +383,7 @@ final class HCI_Sync {
                     $any_variation_changed = $any_variation_changed || $outcome['price_updated'] || $outcome['stock_updated'] || $outcome['deactivated'];
                 } catch (Throwable $e) {
                     $errors++;
+                    $note($e);
                 }
             }
             // وضعیت والد Variable از روی تنوع‌ها دوباره حساب می‌شود.
@@ -339,6 +395,7 @@ final class HCI_Sync {
                     );
                 } catch (Throwable $e) {
                     $errors++;
+                    $note($e);
                 }
             }
         }
@@ -346,7 +403,8 @@ final class HCI_Sync {
         // Cursor فقط وقتی جلو می‌رود که هیچ محصولی خطا نداده باشد؛ وگرنه
         // محصول خطادار دور بعد دوباره در Delta می‌آید (همان‌طور که پیام صفحه
         // می‌گوید «دوباره امتحان می‌شود»). اعمال دوباره بدون تغییر، بی‌ضرر است.
-        if ($errors === 0) {
+        $cursor_advanced = $errors === 0;
+        if ($cursor_advanced) {
             update_option(self::CURSOR_OPTION, $request_started_at, false);
         }
 
@@ -360,6 +418,10 @@ final class HCI_Sync {
             'deactivated' => $deactivated,
             'errors' => $errors,
             'message' => '',
+            'kind' => $kind,
+            'cursor_before' => $cursor,
+            'cursor_advanced' => $cursor_advanced,
+            'error_samples' => $error_samples,
         ), true);
     }
 
@@ -397,7 +459,20 @@ final class HCI_Sync {
         delete_option(self::RETRY_COUNT_OPTION);
     }
 
+    /**
+     * ۳۰ اجرای آخر سینک (جدیدترین اول) — برای ریشه‌یابی «سینک درست کار نمی‌کند».
+     * @return array<int,array<string,mixed>>
+     */
+    public static function get_history(): array {
+        $history = get_option(self::HISTORY_OPTION, array());
+        return is_array($history) ? array_values($history) : array();
+    }
+
     private static function finish(array $summary, bool $success): array {
+        $summary['finished_at'] = current_time('mysql', true);
+        $history = self::get_history();
+        array_unshift($history, $summary);
+        update_option(self::HISTORY_OPTION, array_slice($history, 0, self::HISTORY_LIMIT), false);
         update_option(self::RETRY_COUNT_OPTION, $success ? 0 : (int) get_option(self::RETRY_COUNT_OPTION, 0), false);
         update_option(self::SUMMARY_OPTION, $summary, false);
         return $summary;

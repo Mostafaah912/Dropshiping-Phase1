@@ -123,6 +123,32 @@ final class HMW_Admin {
                 </tbody>
             </table>
 
+            <h2>چند Full Sync آخر</h2>
+            <table class="widefat striped" style="max-width:1100px;margin:0 0 20px">
+                <thead><tr><th>شروع (تهران)</th><th>پایان (تهران)</th><th>وضعیت</th><th>دریافت‌شده</th><th>به‌روزشده</th><th>غیرفعال‌شده</th><th>خطا</th></tr></thead>
+                <tbody>
+                    <?php $recent_full = HMW_DB::get_recent_full_syncs(10); ?>
+                    <?php if (!$recent_full) : ?><tr><td colspan="7">هنوز Full Syncی اجرا نشده.</td></tr><?php endif; ?>
+                    <?php foreach ($recent_full as $log_row) : ?>
+                        <?php
+                        $fmt_log = static function ($utc): string {
+                            $t = !empty($utc) ? strtotime((string) $utc . ' UTC') : false;
+                            return $t ? wp_date('Y-m-d H:i:s', $t, new DateTimeZone(HMW_TIMEZONE)) : '-';
+                        };
+                        ?>
+                        <tr>
+                            <td><?php echo esc_html($fmt_log($log_row['started_at'] ?? '')); ?></td>
+                            <td><?php echo esc_html($fmt_log($log_row['finished_at'] ?? '')); ?></td>
+                            <td><?php echo esc_html((string) ($log_row['status'] ?? '')); ?></td>
+                            <td><?php echo esc_html((string) (int) ($log_row['products_fetched'] ?? 0)); ?></td>
+                            <td><?php echo esc_html((string) (int) ($log_row['products_updated'] ?? 0)); ?></td>
+                            <td><?php echo esc_html((string) (int) ($log_row['products_deactivated'] ?? 0)); ?></td>
+                            <td><?php echo esc_html((string) (int) ($log_row['errors_count'] ?? 0)); ?></td>
+                        </tr>
+                    <?php endforeach; ?>
+                </tbody>
+            </table>
+
             <div id="hmw-live-box" style="max-width:1100px;<?php echo $is_full_running ? '' : 'display:none;'; ?>">
                 <table class="widefat striped">
                     <tbody>

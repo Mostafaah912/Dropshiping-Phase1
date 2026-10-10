@@ -265,22 +265,49 @@ final class HCI_Sync {
             $source_id = (int) ($item['source_product_id'] ?? 0);
             $parent_row = $parent_by_source_id[$source_id] ?? null;
 
+            $variation_rows = $imported_variations[$source_id] ?? array();
+            $is_variable_parent = false;
             if ($parent_row) {
                 $checked++;
-                try {
-                    $outcome = self::apply_item_update((int) $parent_row['dest_product_id'], $item);
-                    $price_updated += $outcome['price_updated'] ? 1 : 0;
-                    $stock_updated += $outcome['stock_updated'] ? 1 : 0;
-                    $deactivated += $outcome['deactivated'] ? 1 : 0;
-                } catch (Throwable $e) {
-                    $errors++;
+                $parent_product = wc_get_product((int) $parent_row['dest_product_id']);
+                $is_variable_parent = $variation_rows || ($parent_product && $parent_product->get_type() === 'variable');
+                $parent_active = isset($item['is_active']) ? (bool) $item['is_active'] : true;
+
+                if ($is_variable_parent && !$parent_active) {
+                    // والد Variable در مبدا غیرفعال شد: مبدا تنوع‌هایش را در delta
+                    // نمی‌فرستد، پس همه تنوع‌های وارد‌شده اینجا ناموجود می‌شوند.
+                    try {
+                        $deactivated += self::deactivate_variable_family($parent_row, $variation_rows) ? 1 : 0;
+                    } catch (Throwable $e) {
+                        $errors++;
+                    }
+                    continue;
+                }
+
+                if ($is_variable_parent) {
+                    // والد Variable قیمت/موجودی مستقل ندارد؛ فقط از روی تنوع‌ها
+                    // (refresh_variable_parent) حساب می‌شود. اگر والد دوباره فعال
+                    // شده و delta تنوع‌ها را نیاورده، وضعیتشان تازه از مبدا می‌آید.
+                    if (empty($item['variations']) && $parent_product && $parent_product->get_stock_status() === 'outofstock') {
+                        $fresh = HCI_Source_Client::get_product($source_id);
+                        if (!empty($fresh['success'])) {
+                            $item['variations'] = (array) ($fresh['item']['variations'] ?? array());
+                        } else {
+                            $errors++;
+                        }
+                    }
+                } else {
+                    try {
+                        $outcome = self::apply_item_update((int) $parent_row['dest_product_id'], $item);
+                        $price_updated += $outcome['price_updated'] ? 1 : 0;
+                        $stock_updated += $outcome['stock_updated'] ? 1 : 0;
+                        $deactivated += $outcome['deactivated'] ? 1 : 0;
+                    } catch (Throwable $e) {
+                        $errors++;
+                    }
                 }
             }
 
-            $variation_rows = $imported_variations[$source_id] ?? array();
-            if (!$variation_rows || empty($item['variations'])) {
-                continue;
-            }
             $variation_row_by_id = array();
             foreach ($variation_rows as $vrow) {
                 $variation_row_by_id[(int) $vrow['source_variation_id']] = $vrow;
@@ -334,6 +361,31 @@ final class HCI_Sync {
             'errors' => $errors,
             'message' => '',
         ), true);
+    }
+
+    /**
+     * همه تنوع‌های وارد‌شده یک والد Variable را ناموجود می‌کند و وضعیت والد را
+     * از روی آن‌ها تازه می‌کند. خروجی: آیا چیزی واقعاً تغییر کرد.
+     */
+    private static function deactivate_variable_family(array $parent_row, array $variation_rows): bool {
+        $changed = false;
+        foreach ($variation_rows as $vrow) {
+            $variation = wc_get_product((int) $vrow['dest_variation_id']);
+            if ($variation && $variation->get_stock_status() !== 'outofstock') {
+                $variation->set_stock_status('outofstock');
+                $variation->save();
+                $changed = true;
+            }
+        }
+        $parent = wc_get_product((int) $parent_row['dest_product_id']);
+        if ($parent && $parent->get_stock_status() !== 'outofstock') {
+            $changed = true;
+        }
+        HCI_Import::refresh_variable_parent(
+            (int) $parent_row['dest_product_id'],
+            array_map(static fn (array $r): int => (int) $r['dest_variation_id'], $variation_rows)
+        );
+        return $changed;
     }
 
     /**

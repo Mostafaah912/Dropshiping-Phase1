@@ -10,7 +10,7 @@ final class HCI_Source_Client {
     private const PARTIAL_STATE_TTL = 30 * MINUTE_IN_SECONDS;
 
     // Rate Limit سمت منبع (class-hmw-rest-api.php: RATE_LIMIT=120 درخواست در
-    // RATE_WINDOW=60 ثانیه در هر IP) یعنی نرخ پایدار مجاز حداکثر ۲ درخواست در
+    // RATE_WINDOW=60 ثانیه برای هر کلید/سایت) یعنی نرخ پایدار مجاز حداکثر ۲ درخواست در
     // ثانیه است. ۶۰۰ میلی‌ثانیه تاخیر بین صفحات ≈ ۱٫۶۷ درخواست در ثانیه —
     // زیر سقف با حاشیه امن، بدون این‌که واکشی ۲۲۰۷ محصول (۲۳ صفحه) را
     // غیرقابل‌تحمل کند (~۱۴ ثانیه تاخیر جمعی).
@@ -35,6 +35,10 @@ final class HCI_Source_Client {
      * منبع درخواست نزند؛ فقط با $force_refresh یا انقضای کش دوباره Fetch می‌شود.
      */
     public static function get_all_products(bool $force_refresh = false): array {
+        $unavailable = self::unavailable();
+        if ($unavailable !== null) {
+            return array_merge(array('success' => false, 'items' => array()), $unavailable);
+        }
         if (!$force_refresh) {
             $cached = get_transient(self::PRODUCTS_CACHE_TRANSIENT);
             if (is_array($cached)) {
@@ -42,11 +46,8 @@ final class HCI_Source_Client {
             }
         }
 
-        $api_url = trim((string) get_option('hci_api_url', ''));
-        $api_key = trim((string) get_option('hci_api_key', ''));
-        if ($api_url === '' || $api_key === '') {
-            return array('success' => false, 'items' => array(), 'message' => 'API URL و API Key باید هر دو تنظیم شوند.');
-        }
+        $api_url = HCI_Connection::url();
+        $api_key = HCI_Connection::key();
 
         // اگر تلاش قبلی به‌خاطر Rate Limit ناقص مانده، از همان صفحه ادامه
         // می‌دهیم (نه از صفر) تا محصولاتی که قبلاً موفق واکشی شده بودند دور
@@ -155,11 +156,12 @@ final class HCI_Source_Client {
      * (چون Cursor جلو نرفته، این عملیات Idempotent است).
      */
     public static function get_delta_products(string $updated_after): array {
-        $api_url = trim((string) get_option('hci_api_url', ''));
-        $api_key = trim((string) get_option('hci_api_key', ''));
-        if ($api_url === '' || $api_key === '') {
-            return array('success' => false, 'items' => array(), 'message' => 'API URL و API Key باید هر دو تنظیم شوند.');
+        $unavailable = self::unavailable();
+        if ($unavailable !== null) {
+            return array_merge(array('success' => false, 'items' => array()), $unavailable);
         }
+        $api_url = HCI_Connection::url();
+        $api_key = HCI_Connection::key();
 
         $items = array();
         $page = 1;
@@ -178,6 +180,7 @@ final class HCI_Source_Client {
                     'success' => false,
                     'items' => $items,
                     'rate_limited' => !empty($result['rate_limited']),
+                    'blocked' => !empty($result['blocked']),
                     'message' => $result['message'],
                 );
             }
@@ -205,11 +208,12 @@ final class HCI_Source_Client {
      * @return array{success:bool,configured:bool,not_found:bool,item:?array,message:string}
      */
     public static function get_product(int $source_product_id): array {
-        $api_url = trim((string) get_option('hci_api_url', ''));
-        $api_key = trim((string) get_option('hci_api_key', ''));
-        if ($api_url === '' || $api_key === '') {
-            return array('success' => false, 'configured' => false, 'not_found' => false, 'item' => null, 'message' => '');
+        $unavailable = self::unavailable();
+        if ($unavailable !== null) {
+            return array_merge(array('success' => false, 'configured' => !empty($unavailable['blocked']), 'not_found' => false, 'item' => null), $unavailable);
         }
+        $api_url = HCI_Connection::url();
+        $api_key = HCI_Connection::key();
         $url = rtrim($api_url, '/') . '/products/' . $source_product_id;
         $result = self::request_json_with_retry($url, $api_key, 15);
         if (!$result['success']) {
@@ -218,6 +222,7 @@ final class HCI_Source_Client {
                 'configured' => true,
                 'not_found' => ($result['status'] ?? 0) === 404,
                 'item' => null,
+                'blocked' => !empty($result['blocked']),
                 'message' => (string) ($result['message'] ?? ''),
             );
         }
@@ -230,12 +235,10 @@ final class HCI_Source_Client {
      * @return array{success:bool,full_sync_status:string}
      */
     public static function get_source_health(): array {
-        $api_url = trim((string) get_option('hci_api_url', ''));
-        $api_key = trim((string) get_option('hci_api_key', ''));
-        if ($api_url === '' || $api_key === '') {
+        if (self::unavailable() !== null) {
             return array('success' => false, 'full_sync_status' => '');
         }
-        $result = self::request_json(rtrim($api_url, '/') . '/health', $api_key, 10);
+        $result = self::request_json(rtrim(HCI_Connection::url(), '/') . '/health', HCI_Connection::key(), 10);
         if (!$result['success'] || !is_array($result['data'])) {
             return array('success' => false, 'full_sync_status' => '');
         }
@@ -247,11 +250,12 @@ final class HCI_Source_Client {
      * @return array{success:bool,items:array,missing:int[],not_supported:bool,message:string}
      */
     public static function get_products_batch(array $source_product_ids): array {
-        $api_url = trim((string) get_option('hci_api_url', ''));
-        $api_key = trim((string) get_option('hci_api_key', ''));
-        if ($api_url === '' || $api_key === '') {
-            return array('success' => false, 'items' => array(), 'missing' => array(), 'not_supported' => false, 'message' => 'اتصال به هی‌مد تنظیم نشده است.');
+        $unavailable = self::unavailable();
+        if ($unavailable !== null) {
+            return array_merge(array('success' => false, 'items' => array(), 'missing' => array(), 'not_supported' => false), $unavailable);
         }
+        $api_url = HCI_Connection::url();
+        $api_key = HCI_Connection::key();
         $ids = array_values(array_unique(array_filter(array_map('intval', $source_product_ids))));
         $url = add_query_arg(array('ids' => implode(',', $ids)), rtrim($api_url, '/') . '/products/batch');
         $result = self::request_json_with_retry($url, $api_key, 20);
@@ -261,6 +265,7 @@ final class HCI_Source_Client {
                 'items' => array(),
                 'missing' => array(),
                 'not_supported' => ($result['status'] ?? 0) === 404,
+                'blocked' => !empty($result['blocked']),
                 'message' => (string) ($result['message'] ?? ''),
             );
         }
@@ -291,8 +296,28 @@ final class HCI_Source_Client {
      * add_query_arg() هر دو فرمت (Pretty Permalinks و ?rest_route=) را درست
      * merge می‌کند — همه‌ی Endpointهای این کلاینت باید از همین مسیر بگذرند.
      */
+    /**
+     * @return array{blocked?:bool,message:string}|null  null یعنی می‌شود درخواست زد.
+     */
+    private static function unavailable(): ?array {
+        if (HCI_Connection::is_blocked()) {
+            return array('blocked' => true, 'message' => HCI_Connection::blocked_message());
+        }
+        if (!HCI_Connection::is_configured()) {
+            return array('blocked' => false, 'message' => HCI_Connection::unavailable_message());
+        }
+        return null;
+    }
+
     private static function request_json_with_retry(string $url, string $api_key, int $timeout): array {
         $result = self::request_json($url, $api_key, $timeout);
+
+        // کلید نامعتبر (مثلاً بعد از صدور دوباره در مبدا): یک‌بار فعال‌سازی خودکار و تکرار همان درخواست.
+        if (!$result['success'] && in_array($result['code'] ?? '', array('hmw_api_invalid_key', 'hmw_api_missing_key'), true)
+            && HCI_Connection::allow_reactivation() && HCI_Connection::activate()['success']) {
+            $result = self::request_json($url, HCI_Connection::key(), $timeout);
+        }
+
         if (($result['status'] ?? null) !== 429) {
             return $result;
         }
@@ -315,7 +340,8 @@ final class HCI_Source_Client {
         ));
 
         if (is_wp_error($response)) {
-            return array('success' => false, 'message' => 'خطا در ارتباط با سرور منبع: ' . $response->get_error_message(), 'status' => 0);
+            // متن خطای شبکه ممکن است آدرس مبدا را داشته باشد؛ نشان داده/ذخیره نمی‌شود.
+            return array('success' => false, 'message' => 'ارتباط با سرور هی‌مد ممکن نشد.', 'status' => 0, 'code' => 'unreachable');
         }
 
         $status = (int) wp_remote_retrieve_response_code($response);
@@ -323,10 +349,16 @@ final class HCI_Source_Client {
         $json = json_decode($body, true);
 
         if ($status < 200 || $status >= 300 || !is_array($json) || empty($json['success'])) {
+            $code = is_array($json) ? (string) ($json['code'] ?? ($json['error']['code'] ?? '')) : '';
+            if ($code === 'hmw_site_disabled') {
+                HCI_Connection::mark_disabled();
+                return array('success' => false, 'message' => HCI_Connection::blocked_message(), 'status' => $status, 'code' => $code, 'blocked' => true);
+            }
             return array(
                 'success' => false,
-                'message' => sprintf('پاسخ سرور منبع: HTTP %d%s', $status, self::extract_error_message($json, $response)),
+                'message' => HCI_Connection::scrub(sprintf('پاسخ سرور هی‌مد: HTTP %d%s', $status, self::extract_error_message($json, $response))),
                 'status' => $status,
+                'code' => $code,
             );
         }
 
@@ -337,6 +369,18 @@ final class HCI_Source_Client {
             'missing' => $json['missing'] ?? array(),
             'status' => $status,
         );
+    }
+
+    /**
+     * بررسی سبک /health برای صفحه‌ی اتصال و بررسی روزانه؛ بدون فعال‌سازی خودکار.
+     * @return array{ok:bool,code:string}
+     */
+    public static function probe(): array {
+        if (HCI_Connection::url() === '' || HCI_Connection::key() === '') {
+            return array('ok' => false, 'code' => 'hmw_api_missing_key');
+        }
+        $result = self::request_json(rtrim(HCI_Connection::url(), '/') . '/health', HCI_Connection::key(), 10);
+        return array('ok' => !empty($result['success']), 'code' => (string) ($result['code'] ?? ''));
     }
 
     private static function extract_error_message($json, $response): string {
@@ -359,7 +403,7 @@ final class HCI_Source_Client {
         $api_key = trim($api_key);
 
         if ($api_url === '' || $api_key === '') {
-            return array('success' => false, 'message' => 'API URL و API Key باید هر دو تنظیم شوند.');
+            return array('success' => false, 'message' => HCI_Connection::unavailable_message());
         }
 
         $url = rtrim($api_url, '/') . '/health';
@@ -372,7 +416,7 @@ final class HCI_Source_Client {
         ));
 
         if (is_wp_error($response)) {
-            return array('success' => false, 'message' => 'خطا در ارتباط با سرور منبع: ' . $response->get_error_message());
+            return array('success' => false, 'message' => 'ارتباط با سرور هی‌مد ممکن نشد.');
         }
 
         $status = (int) wp_remote_retrieve_response_code($response);
@@ -387,13 +431,13 @@ final class HCI_Source_Client {
             // بی‌صدا با پیام عمومی HTTP جایگزین می‌شود.
             return array(
                 'success' => false,
-                'message' => sprintf('پاسخ سرور منبع: HTTP %d%s', $status, self::extract_error_message($json, $response)),
+                'message' => HCI_Connection::scrub(sprintf('پاسخ سرور هی‌مد: HTTP %d%s', $status, self::extract_error_message($json, $response))),
                 'status' => $status,
             );
         }
 
         if (!is_array($json) || empty($json['success'])) {
-            return array('success' => false, 'message' => 'پاسخ سرور منبع معتبر (JSON) نبود.', 'status' => $status);
+            return array('success' => false, 'message' => 'پاسخ سرور هی‌مد معتبر نبود.', 'status' => $status);
         }
 
         return array(

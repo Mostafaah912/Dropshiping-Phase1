@@ -4,8 +4,6 @@ defined('ABSPATH') || exit;
 
 final class HCI_Admin {
     private const CAPABILITY = 'manage_woocommerce';
-    private const API_URL_OPTION = 'hci_api_url';
-    private const API_KEY_OPTION = 'hci_api_key';
 
     public static function requirements_met(): bool {
         return PHP_VERSION_ID >= 80100 && self::woocommerce_active();
@@ -52,8 +50,7 @@ final class HCI_Admin {
 
     public static function init(): void {
         add_action('admin_menu', array(__CLASS__, 'admin_menu'));
-        add_action('admin_post_hci_save_connection', array(__CLASS__, 'handle_save_connection'));
-        add_action('admin_post_hci_test_connection', array(__CLASS__, 'handle_test_connection'));
+        add_action('admin_post_hci_recheck_connection', array(__CLASS__, 'handle_recheck_connection'));
         add_action('admin_post_hci_save_pricing', array(__CLASS__, 'handle_save_pricing'));
         add_action('admin_post_hci_reset_data', array(__CLASS__, 'handle_reset_data'));
     }
@@ -86,12 +83,8 @@ final class HCI_Admin {
         <div class="wrap">
             <h1>HeyMode Client Importer — v<?php echo esc_html(HCI_VERSION); ?></h1>
 
-            <?php if ($notice === 'connection_saved') : ?>
-                <div class="notice notice-success is-dismissible"><p>تنظیمات اتصال ذخیره شد.</p></div>
-            <?php elseif ($notice === 'connection_ok') : ?>
-                <div class="notice notice-success is-dismissible"><p>تست اتصال موفق بود.</p></div>
-            <?php elseif ($notice === 'connection_failed') : ?>
-                <div class="notice notice-error is-dismissible"><p>تست اتصال ناموفق بود. جزئیات: <?php echo esc_html((string) get_transient('hci_last_test_message')); ?></p></div>
+            <?php if ($notice === 'connection_checked') : ?>
+                <div class="notice notice-info is-dismissible"><p>اتصال دوباره بررسی شد.</p></div>
             <?php elseif ($notice === 'pricing_saved') : ?>
                 <div class="notice notice-success is-dismissible"><p>تنظیمات قیمت‌گذاری ذخیره شد.</p></div>
             <?php elseif ($notice === 'data_reset') :
@@ -134,40 +127,23 @@ final class HCI_Admin {
     }
 
     private static function render_connection_tab(): void {
-        $api_url = (string) get_option(self::API_URL_OPTION, '');
-        $api_key = (string) get_option(self::API_KEY_OPTION, '');
+        // باز شدن صفحه وقتی وصل نیست: تلاش خودکار (حداکثر هر ۱۰ دقیقه).
+        HCI_Connection::refresh_on_page_open();
+        $info = HCI_Connection::describe();
         ?>
-        <h2>اتصال به API هی‌مد Wholesale</h2>
+        <h2>اتصال به هی‌مد</h2>
+        <div style="max-width:560px;background:#fff;border:1px solid #dcdcde;border-radius:4px;padding:20px;margin:16px 0">
+            <p style="margin:0;font-size:18px;font-weight:700;color:<?php echo $info['ok'] ? '#008a20' : '#b32d2e'; ?>">
+                <?php echo $info['ok'] ? '✓ ' : '✕ '; ?><?php echo esc_html($info['headline']); ?>
+            </p>
+            <?php if ($info['reason'] !== '') : ?>
+                <p style="margin:10px 0 0;color:#50575e"><?php echo esc_html($info['reason']); ?></p>
+            <?php endif; ?>
+        </div>
         <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
-            <input type="hidden" name="action" value="hci_save_connection">
-            <?php wp_nonce_field('hci_save_connection'); ?>
-            <table class="form-table">
-                <tbody>
-                    <tr>
-                        <th><label for="hci_api_url">API URL</label></th>
-                        <td>
-                            <input type="url" id="hci_api_url" name="api_url" class="regular-text" style="width:100%;max-width:520px"
-                                placeholder="https://source-site.example.com/wp-json/hmw/v1"
-                                value="<?php echo esc_attr($api_url); ?>">
-                        </td>
-                    </tr>
-                    <tr>
-                        <th><label for="hci_api_key">API Key</label></th>
-                        <td>
-                            <input type="password" id="hci_api_key" name="api_key" class="regular-text" style="width:100%;max-width:520px"
-                                autocomplete="off"
-                                value="<?php echo esc_attr($api_key); ?>">
-                        </td>
-                    </tr>
-                </tbody>
-            </table>
-            <p><button type="submit" class="button button-primary">ذخیره تنظیمات اتصال</button></p>
-        </form>
-
-        <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
-            <input type="hidden" name="action" value="hci_test_connection">
-            <?php wp_nonce_field('hci_test_connection'); ?>
-            <button type="submit" class="button">تست اتصال</button>
+            <input type="hidden" name="action" value="hci_recheck_connection">
+            <?php wp_nonce_field('hci_recheck_connection'); ?>
+            <button type="submit" class="button button-primary">بررسی دوباره</button>
         </form>
         <?php
     }
@@ -454,24 +430,10 @@ final class HCI_Admin {
         exit;
     }
 
-    public static function handle_save_connection(): void {
-        self::guard('hci_save_connection');
-        $api_url = isset($_POST['api_url']) ? esc_url_raw(wp_unslash($_POST['api_url'])) : '';
-        $api_key = isset($_POST['api_key']) ? trim((string) wp_unslash($_POST['api_key'])) : '';
-        update_option(self::API_URL_OPTION, $api_url, false);
-        update_option(self::API_KEY_OPTION, $api_key, false);
-        wp_safe_redirect(add_query_arg(array('page' => 'heymode-client-importer', 'tab' => 'connection', 'hci_notice' => 'connection_saved'), admin_url('admin.php')));
-        exit;
-    }
-
-    public static function handle_test_connection(): void {
-        self::guard('hci_test_connection');
-        $api_url = (string) get_option(self::API_URL_OPTION, '');
-        $api_key = (string) get_option(self::API_KEY_OPTION, '');
-        $result = HCI_Source_Client::test_connection($api_url, $api_key);
-        set_transient('hci_last_test_message', $result['message'] ?? '', 60);
-        $notice = !empty($result['success']) ? 'connection_ok' : 'connection_failed';
-        wp_safe_redirect(add_query_arg(array('page' => 'heymode-client-importer', 'tab' => 'connection', 'hci_notice' => $notice), admin_url('admin.php')));
+    public static function handle_recheck_connection(): void {
+        self::guard('hci_recheck_connection');
+        HCI_Connection::refresh(true);
+        wp_safe_redirect(add_query_arg(array('page' => 'heymode-client-importer', 'tab' => 'connection', 'hci_notice' => 'connection_checked'), admin_url('admin.php')));
         exit;
     }
 

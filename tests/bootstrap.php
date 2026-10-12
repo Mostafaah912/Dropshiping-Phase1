@@ -41,6 +41,7 @@ function get_option(string $name, $default = false) {
 }
 
 function update_option(string $name, $value, $autoload = null): bool {
+    $GLOBALS['__test_option_autoload'][$name] = $autoload;
     // مثل وردپرس واقعی: اگر مقدار جدید با مقدار فعلی (برای گزینه‌ی ساخته‌نشده: false) یکی باشد، چیزی ذخیره نمی‌شود.
     $old = $GLOBALS['__test_options'][$name] ?? false;
     if ($value === $old) {
@@ -321,6 +322,21 @@ function wp_safe_remote_get(string $url, array $args = array()) {
         return $responder($url, $args);
     }
     return new WP_Error('http_request_failed', 'no responder');
+}
+
+function home_url(string $path = ''): string {
+    return ($GLOBALS['__test_home_url'] ?? 'https://client-shop.example') . $path;
+}
+
+function wp_parse_url(string $url, int $component = -1) {
+    return parse_url($url, $component);
+}
+
+/** درخواست فعال‌سازی کلاینت → مبدا. $GLOBALS['__stub_post_responder'] = callable(url, args). */
+function wp_remote_post(string $url, array $args = array()) {
+    $GLOBALS['__test_post_calls'][] = array('url' => $url, 'args' => $args);
+    $responder = $GLOBALS['__stub_post_responder'] ?? null;
+    return is_callable($responder) ? $responder($url, $args) : new WP_Error('http_request_failed', 'no responder');
 }
 
 function wp_remote_retrieve_response_code($response): int {
@@ -1036,6 +1052,7 @@ require_once HMW_REPO_ROOT . '/includes/class-hmw-source-api.php';
 require_once HMW_REPO_ROOT . '/includes/class-hmw-rest-api.php';
 require_once HMW_REPO_ROOT . '/includes/class-hmw-admin.php';
 require_once HCI_REPO_ROOT . '/includes/class-hci-db.php';
+require_once HCI_REPO_ROOT . '/includes/class-hci-connection.php';
 require_once HCI_REPO_ROOT . '/includes/class-hci-source-client.php';
 require_once HCI_REPO_ROOT . '/includes/class-hci-pricing.php';
 require_once HCI_REPO_ROOT . '/includes/class-hci-products.php';

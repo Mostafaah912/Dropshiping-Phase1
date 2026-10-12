@@ -685,6 +685,9 @@ final class HCI_Import {
         if (!empty($fresh['not_found'])) {
             return array('error_message' => 'این محصول دیگر در هی‌مد فروخته نمی‌شود، برای همین وارد نشد.');
         }
+        if (!empty($fresh['blocked'])) {
+            return array('error_message' => HCI_Connection::blocked_message());
+        }
         if (empty($fresh['success'])) {
             return array('error_message' => 'ارتباط با هی‌مد برای گرفتن قیمت و موجودی تازه برقرار نشد. کمی بعد دوباره تلاش کنید.');
         }

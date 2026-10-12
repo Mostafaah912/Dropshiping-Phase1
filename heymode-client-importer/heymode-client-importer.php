@@ -2,7 +2,7 @@
 /**
  * Plugin Name: HeyMode Client Importer
  * Description: اسکلت اولیه پلاگین سایت مشتری برای اتصال به API هی‌مد Wholesale، تنظیم فرمول قیمت‌گذاری، و ردیابی Import محصولات.
- * Version: 0.7.0
+ * Version: 0.8.0
  * Requires at least: 6.5
  * Requires PHP: 8.1
  * Author: HeyMode
@@ -11,12 +11,17 @@
 
 defined('ABSPATH') || exit;
 
-if (!defined('HCI_VERSION')) define('HCI_VERSION', '0.7.0');
+if (!defined('HCI_VERSION')) define('HCI_VERSION', '0.8.0');
 if (!defined('HCI_FILE')) define('HCI_FILE', __FILE__);
+// آدرس پایه‌ی API هی‌مد (مثل https://…/wp-json/hmw/v1). مالک پلاگین قبل از انتشار آن را
+// اینجا یا با ثابت HCI_SOURCE_URL در wp-config.php (برای تست/استیجینگ) تعیین می‌کند.
+// تا آن موقع، سایت‌های موجود با آدرس قبلیِ ذخیره‌شده کار می‌کنند.
+if (!defined('HCI_DEFAULT_SOURCE_URL')) define('HCI_DEFAULT_SOURCE_URL', '');
 if (!defined('HCI_DIR')) define('HCI_DIR', plugin_dir_path(__FILE__));
 if (!defined('HCI_URL')) define('HCI_URL', plugin_dir_url(__FILE__));
 
 require_once HCI_DIR . 'includes/class-hci-db.php';
+require_once HCI_DIR . 'includes/class-hci-connection.php';
 require_once HCI_DIR . 'includes/class-hci-source-client.php';
 require_once HCI_DIR . 'includes/class-hci-pricing.php';
 require_once HCI_DIR . 'includes/class-hci-admin.php';
@@ -26,6 +31,7 @@ require_once HCI_DIR . 'includes/class-hci-sync.php';
 require_once HCI_DIR . 'includes/class-hci-cli.php';
 
 register_activation_hook(HCI_FILE, array('HCI_Admin', 'activate'));
+register_activation_hook(HCI_FILE, array('HCI_Connection', 'on_plugin_activation'));
 register_deactivation_hook(HCI_FILE, array('HCI_Admin', 'deactivate'));
 
 add_action('plugins_loaded', static function (): void {
@@ -35,6 +41,7 @@ add_action('plugins_loaded', static function (): void {
     }
     HCI_DB::ensure_schema();
     HCI_Admin::init();
+    HCI_Connection::init();
     HCI_Products::init();
     HCI_Import::init();
     HCI_Sync::init();

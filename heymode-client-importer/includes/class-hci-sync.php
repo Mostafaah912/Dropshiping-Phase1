@@ -252,11 +252,15 @@ final class HCI_Sync {
         $last_ts = $cursor !== '' ? strtotime($cursor . ' UTC') : false;
         HCI_DB::reconcile_removed_throttled();
         $imported_count = count(HCI_DB::get_imported_parent_rows());
+        $blocked = HCI_Connection::is_blocked();
         ?>
         <div class="wrap">
             <h1>بروزرسانی قیمت و موجودی</h1>
             <p>هر روز صبح ساعت ۶، قیمت و موجودی محصولاتی که از هی‌مد وارد کرده‌اید خودکار با هی‌مد هماهنگ می‌شود.</p>
 
+            <?php if ($blocked) : ?>
+                <div class="notice notice-warning"><p><?php echo esc_html(HCI_Connection::blocked_message()); ?></p></div>
+            <?php endif; ?>
             <?php if ($notice === 'reconciled' || $notice === 'reconcile_failed') : ?>
                 <?php $rs = get_option(self::RECONCILE_SUMMARY_OPTION, null); ?>
                 <?php if ($notice === 'reconciled') : ?>
@@ -378,6 +382,30 @@ final class HCI_Sync {
             $cursor = '1970-01-01 00:00:00';
         }
 
+        // قطع‌شده توسط هی‌مد (D1): هیچ تغییری در قیمت/موجودی/محصولات؛ فقط بررسی سبک
+        // روزانه (یا دکمه دستی) برای فهمیدن فعال‌شدن دوباره، و بدون Retry.
+        if (HCI_Connection::is_blocked() && $kind !== 'retry') {
+            HCI_Connection::refresh(true);
+        }
+        if (HCI_Connection::is_blocked()) {
+            return self::finish(array(
+                'started_at' => $request_started_at,
+                'manual' => $manual,
+                'success' => false,
+                'blocked' => true,
+                'checked' => 0,
+                'price_updated' => 0,
+                'stock_updated' => 0,
+                'deactivated' => 0,
+                'errors' => 0,
+                'message' => HCI_Connection::blocked_message(),
+                'kind' => $kind,
+                'cursor_before' => $cursor,
+                'cursor_advanced' => false,
+                'error_samples' => array(),
+            ), false);
+        }
+
         // Full Sync ساعت ۰۴:۰۰ مبدا ممکن است تا ۰۶:۰۰ طول بکشد؛ اگر هنوز در حال
         // اجراست کمی صبر می‌کنیم (Backoff همان Retry: ۵ و بعد ۱۰ دقیقه). بعد از
         // دو بار انتظار بی‌خیال می‌شویم چون Cursor امن است. دستی هیچ‌وقت منتظر نمی‌ماند.
@@ -407,8 +435,8 @@ final class HCI_Sync {
         $result = HCI_Source_Client::get_delta_products($cursor);
 
         if (!$result['success']) {
-            // Sync Now دستی از سهمیه Retry روزانه مصرف نمی‌کند.
-            if (!$manual) {
+            // Sync Now دستی از سهمیه Retry روزانه مصرف نمی‌کند؛ قطع‌شدن توسط هی‌مد هم Retry ندارد.
+            if (!$manual && empty($result['blocked'])) {
                 self::schedule_retry();
             }
             return self::finish(array(
@@ -420,7 +448,8 @@ final class HCI_Sync {
                 'stock_updated' => 0,
                 'deactivated' => 0,
                 'errors' => 1,
-                'message' => 'دریافت تغییرات از منبع ناموفق بود: ' . ($result['message'] ?? ''),
+                'message' => !empty($result['blocked']) ? (string) $result['message'] : 'دریافت تغییرات از هی‌مد ناموفق بود: ' . ($result['message'] ?? ''),
+                'blocked' => !empty($result['blocked']),
                 'kind' => $kind,
                 'cursor_before' => $cursor,
                 'cursor_advanced' => false,

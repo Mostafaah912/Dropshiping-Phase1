@@ -310,6 +310,19 @@ function wp_remote_get(string $url, array $args = array()) {
     );
 }
 
+/**
+ * wp_safe_remote_get: درخواست برگشتی مبدا به سایت مشتری. تست با
+ * $GLOBALS['__stub_safe_get_responder'] (callable(url, args) → پاسخ یا WP_Error) کنترلش می‌کند.
+ */
+function wp_safe_remote_get(string $url, array $args = array()) {
+    $GLOBALS['__test_safe_get_calls'][] = array('url' => $url, 'args' => $args);
+    $responder = $GLOBALS['__stub_safe_get_responder'] ?? null;
+    if (is_callable($responder)) {
+        return $responder($url, $args);
+    }
+    return new WP_Error('http_request_failed', 'no responder');
+}
+
 function wp_remote_retrieve_response_code($response): int {
     return (int) ($response['response']['code'] ?? 0);
 }
@@ -352,6 +365,7 @@ final class WP_Error {
 
 final class WP_REST_Server {
     public const READABLE = 'GET';
+    public const CREATABLE = 'POST';
 }
 
 final class WP_REST_Request {

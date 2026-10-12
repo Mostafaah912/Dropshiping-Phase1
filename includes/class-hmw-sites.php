@@ -215,6 +215,26 @@ final class HMW_Sites {
         return $key;
     }
 
+    /**
+     * صدور اتمیک کلید برای سایتِ «آماده فعال‌سازی»: فقط اگر هنوز pending و بدون
+     * کلید باشد. اگر درخواست هم‌زمان دیگری زودتر کلید گرفته باشد، null برمی‌گردد.
+     */
+    public static function issue_key_if_pending(int $id): ?string {
+        global $wpdb;
+        $raw = 'hmw_' . wp_generate_uuid4() . '_' . bin2hex(random_bytes(24));
+        $key = rtrim(strtr(base64_encode($raw), '+/', '-_'), '=');
+        $affected = $wpdb->query($wpdb->prepare(
+            'UPDATE ' . self::table() . ' SET key_hash = %s, key_prefix = %s, status = %s, activated_at = %s WHERE id = %d AND status = %s AND key_hash IS NULL',
+            hash('sha256', $key),
+            substr($key, 0, 12),
+            self::STATUS_ACTIVE,
+            current_time('mysql', true),
+            $id,
+            self::STATUS_PENDING
+        ));
+        return ((int) $affected === 1) ? $key : null;
+    }
+
     // ------------------------------------------------------------------ ارتباط
 
     public static function touch_seen(array $row): void {

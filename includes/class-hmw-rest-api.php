@@ -11,6 +11,8 @@ final class HMW_REST_API {
     private const REVOKED_OPTION = 'hmw_api_revoked_at';
     private const LEGACY_ENABLED_OPTION = 'hmw_legacy_key_enabled';
     private const FAIL_LIMIT = 30;
+    private const ACTIVATION_IP_LIMIT = 20;
+    private const ACTIVATION_DOMAIN_LIMIT = 5;
     private const RATE_LIMIT = 120;
     private const RATE_WINDOW = 60;
 
@@ -54,6 +56,15 @@ final class HMW_REST_API {
             'methods' => WP_REST_Server::READABLE,
             'callback' => array(__CLASS__, 'health'),
             'permission_callback' => array(__CLASS__, 'authorize'),
+        ));
+
+        // فعال‌سازی سایت مشتری: بدون کلید؛ همه‌ی بررسی‌ها داخل activate() است.
+        register_rest_route(self::NAMESPACE, '/activate', array(
+            array(
+                'methods' => WP_REST_Server::CREATABLE,
+                'callback' => array(__CLASS__, 'activate'),
+                'permission_callback' => '__return_true',
+            ),
         ));
 
         register_rest_route(self::NAMESPACE, '/products', array(
@@ -100,6 +111,91 @@ final class HMW_REST_API {
                 ),
             ),
         ));
+    }
+
+    // ------------------------------------------------------------------ فعال‌سازی + اثبات مالکیت دامنه
+
+    private static function activation_failure(int $status = 403): WP_REST_Response {
+        if ($status === 429) {
+            return new WP_REST_Response(array(
+                'success' => false,
+                'error' => array('code' => 'hmw_api_rate_limited', 'message' => 'تعداد درخواست‌ها بیش از حد مجاز است. کمی بعد دوباره تلاش کنید.'),
+            ), 429);
+        }
+        // یک پاسخ یکسان برای همه‌ی شکست‌ها: ثبت‌نشده، غیرفعال، فعال‌شده یا اثبات ناموفق.
+        return new WP_REST_Response(array(
+            'success' => false,
+            'error' => array('code' => 'hmw_activation_failed', 'message' => 'فعال‌سازی ممکن نشد.'),
+        ), 403);
+    }
+
+    /**
+     * POST /activate {domain, secret}. فقط دامنه‌ی از قبل ثبت‌شده و «آماده فعال‌سازی»
+     * و فقط بعد از اثبات مالکیت: مبدا یک challenge تصادفی به مسیر عمومی همان
+     * دامنه می‌فرستد و باید HMAC(secret, challenge) برگردد. کلید یک‌بار صادر می‌شود.
+     */
+    public static function activate(WP_REST_Request $request): WP_REST_Response {
+        if (!self::is_secure_request()) {
+            return self::activation_failure();
+        }
+        $ip = self::client_ip();
+        if (!HMW_Rate_Limiter::allow('act_ip_' . $ip, self::ACTIVATION_IP_LIMIT, HOUR_IN_SECONDS)) {
+            HMW_Sites::log_reject('activation_rate_limited_ip');
+            return self::activation_failure(429);
+        }
+
+        $domain = HMW_Sites::normalize_domain((string) $request->get_param('domain'));
+        $secret = (string) $request->get_param('secret');
+        if ($domain === null || !preg_match('/^[a-f0-9]{64}$/', $secret)) {
+            HMW_Sites::log_reject('activation_invalid_request');
+            return self::activation_failure();
+        }
+        if (!HMW_Rate_Limiter::allow('act_dom_' . $domain, self::ACTIVATION_DOMAIN_LIMIT, 15 * MINUTE_IN_SECONDS)) {
+            HMW_Sites::log_reject('activation_rate_limited_domain', $domain);
+            return self::activation_failure(429);
+        }
+
+        $site = HMW_Sites::find_by_domain($domain);
+        if ($site === null || $site['status'] !== HMW_Sites::STATUS_PENDING || !empty($site['key_hash'])) {
+            HMW_Sites::log_reject('activation_rejected', $domain);
+            return self::activation_failure();
+        }
+
+        if (!self::verify_domain_ownership($domain, $secret)) {
+            HMW_Sites::log_reject('activation_proof_failed', $domain);
+            return self::activation_failure();
+        }
+
+        $key = HMW_Sites::issue_key_if_pending((int) $site['id']);
+        if ($key === null) {
+            HMW_Sites::log_reject('activation_race_lost', $domain);
+            return self::activation_failure();
+        }
+        return new WP_REST_Response(array('success' => true, 'data' => array('api_key' => $key)), 200);
+    }
+
+    /**
+     * درخواست برگشتی: GET https://{domain}/?rest_route=/hci/v1/ownership&challenge=…
+     * با wp_safe_remote_get (IP داخلی/پورت غیرمجاز مسدود)، timeout کوتاه و بدون Redirect.
+     * نشانی را فقط از «دامنه‌ی ثبت‌شده» می‌سازد، نه از ورودی کلاینت. اگر سایت فقط با
+     * www پاسخ می‌دهد، آن را هم امتحان می‌کند.
+     */
+    private static function verify_domain_ownership(string $domain, string $secret): bool {
+        $challenge = bin2hex(random_bytes(32));
+        $expected = hash_hmac('sha256', $challenge, $secret);
+        foreach (array($domain, 'www.' . $domain) as $host) {
+            $url = add_query_arg(array('rest_route' => '/hci/v1/ownership', 'challenge' => $challenge), 'https://' . $host . '/');
+            $response = wp_safe_remote_get($url, array('timeout' => 5, 'redirection' => 0, 'sslverify' => true));
+            if (is_wp_error($response) || (int) wp_remote_retrieve_response_code($response) !== 200) {
+                continue;
+            }
+            $json = json_decode((string) wp_remote_retrieve_body($response), true);
+            $proof = is_array($json) && isset($json['proof']) && is_string($json['proof']) ? $json['proof'] : '';
+            if ($proof !== '' && hash_equals($expected, $proof)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public static function authorize(WP_REST_Request $request) {

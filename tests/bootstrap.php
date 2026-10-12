@@ -24,6 +24,18 @@ define('HCI_VERSION', '0.5.1-test');
 
 $GLOBALS['__test_options'] = array();
 
+$GLOBALS['__test_is_ssl'] = true;
+function is_ssl(): bool {
+    return (bool) $GLOBALS['__test_is_ssl'];
+}
+
+function wp_generate_uuid4(): string {
+    $d = random_bytes(16);
+    $d[6] = chr(ord($d[6]) & 0x0f | 0x40);
+    $d[8] = chr(ord($d[8]) & 0x3f | 0x80);
+    return vsprintf('%s%s-%s-%s-%s-%s%s%s', str_split(bin2hex($d), 4));
+}
+
 function get_option(string $name, $default = false) {
     return $GLOBALS['__test_options'][$name] ?? $default;
 }
@@ -344,9 +356,15 @@ final class WP_REST_Server {
 
 final class WP_REST_Request {
     private array $params;
+    private array $headers;
 
-    public function __construct(array $params = array()) {
+    public function __construct(array $params = array(), array $headers = array()) {
         $this->params = $params;
+        $this->headers = array_change_key_case($headers, CASE_LOWER);
+    }
+
+    public function get_header(string $key) {
+        return $this->headers[strtolower(str_replace('_', '-', $key))] ?? null;
     }
 
     public function get_param(string $key) {
@@ -538,6 +556,22 @@ function hmw_test_create_products_db(): Fake_WPDB {
             updated_at TEXT NULL
         )
     SQL);
+    $pdo->exec(<<<'SQL'
+        CREATE TABLE wp_hmw_client_sites (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            domain TEXT NOT NULL,
+            key_hash TEXT NULL,
+            key_prefix TEXT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            note TEXT NULL,
+            created_at TEXT NULL,
+            activated_at TEXT NULL,
+            last_seen_at TEXT NULL,
+            last_sync_at TEXT NULL
+        )
+    SQL);
+    $pdo->exec('CREATE UNIQUE INDEX hmw_sites_domain ON wp_hmw_client_sites (domain)');
+    $pdo->exec('CREATE INDEX hmw_sites_key_hash ON wp_hmw_client_sites (key_hash)');
     return new Fake_WPDB($pdo);
 }
 
@@ -982,8 +1016,11 @@ define('HMW_REPO_ROOT', dirname(__DIR__));
 define('HCI_REPO_ROOT', dirname(__DIR__) . '/heymode-client-importer');
 
 require_once HMW_REPO_ROOT . '/includes/class-hmw-db.php';
+require_once HMW_REPO_ROOT . '/includes/class-hmw-rate-limiter.php';
+require_once HMW_REPO_ROOT . '/includes/class-hmw-sites.php';
 require_once HMW_REPO_ROOT . '/includes/class-hmw-source-api.php';
 require_once HMW_REPO_ROOT . '/includes/class-hmw-rest-api.php';
+require_once HMW_REPO_ROOT . '/includes/class-hmw-admin.php';
 require_once HCI_REPO_ROOT . '/includes/class-hci-db.php';
 require_once HCI_REPO_ROOT . '/includes/class-hci-source-client.php';
 require_once HCI_REPO_ROOT . '/includes/class-hci-pricing.php';

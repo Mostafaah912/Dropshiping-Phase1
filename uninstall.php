@@ -24,3 +24,6 @@ delete_option('hmw_api_key_prefix');
 delete_option('hmw_api_key_created_at');
 delete_option('hmw_api_ip_allowlist');
 delete_option('hmw_api_revoked_at');
+delete_option('hmw_legacy_key_enabled');
+delete_option('hmw_reject_log');
+delete_option('hmw_reject_counts');

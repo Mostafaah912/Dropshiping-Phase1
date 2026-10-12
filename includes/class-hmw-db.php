@@ -8,6 +8,11 @@ final class HMW_DB {
         return $wpdb->prefix . 'hmw_products';
     }
 
+    public static function client_sites_table(): string {
+        global $wpdb;
+        return $wpdb->prefix . 'hmw_client_sites';
+    }
+
     public static function sync_logs_table(): string {
         global $wpdb;
         return $wpdb->prefix . 'hmw_sync_logs';
@@ -98,8 +103,27 @@ final class HMW_DB {
             KEY started_at (started_at)
         ) {$charset_collate};";
 
+        $sites = self::client_sites_table();
+        $sql_sites = "CREATE TABLE {$sites} (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            domain VARCHAR(253) NOT NULL,
+            key_hash CHAR(64) NULL,
+            key_prefix VARCHAR(16) NULL,
+            status VARCHAR(20) NOT NULL DEFAULT 'pending',
+            note TEXT NULL,
+            created_at DATETIME NULL,
+            activated_at DATETIME NULL,
+            last_seen_at DATETIME NULL,
+            last_sync_at DATETIME NULL,
+            PRIMARY KEY (id),
+            UNIQUE KEY domain (domain),
+            KEY key_hash (key_hash),
+            KEY status (status)
+        ) {$charset_collate};";
+
         dbDelta($sql_products);
         dbDelta($sql_logs);
+        dbDelta($sql_sites);
         update_option('hmw_db_version', HMW_VERSION, false);
     }
 

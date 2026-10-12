@@ -9,7 +9,8 @@ final class HMW_REST_API {
     private const KEY_CREATED_OPTION = 'hmw_api_key_created_at';
     private const IP_ALLOWLIST_OPTION = 'hmw_api_ip_allowlist';
     private const REVOKED_OPTION = 'hmw_api_revoked_at';
-    private const RATE_PREFIX = 'hmw_api_rate_';
+    private const LEGACY_ENABLED_OPTION = 'hmw_legacy_key_enabled';
+    private const FAIL_LIMIT = 30;
     private const RATE_LIMIT = 120;
     private const RATE_WINDOW = 60;
 
@@ -102,16 +103,15 @@ final class HMW_REST_API {
     }
 
     public static function authorize(WP_REST_Request $request) {
-        if (!self::is_configured()) {
-            return new WP_Error('hmw_api_not_configured', 'API Key تنظیم نشده است.', array('status' => 503));
+        HMW_Sites::$current = null;
+
+        if (!self::is_secure_request()) {
+            HMW_Sites::log_reject('https_required');
+            return new WP_Error('hmw_https_required', 'این API فقط با HTTPS در دسترس است.', array('status' => 403));
         }
 
         if (!self::ip_allowed()) {
             return new WP_Error('hmw_api_ip_denied', 'دسترسی از این IP مجاز نیست.', array('status' => 403));
-        }
-
-        if (!self::rate_allowed()) {
-            return new WP_Error('hmw_api_rate_limited', 'تعداد درخواست‌ها بیش از حد مجاز است. کمی بعد دوباره تلاش کنید.', array('status' => 429));
         }
 
         $token = self::extract_token($request);
@@ -119,13 +119,88 @@ final class HMW_REST_API {
             return new WP_Error('hmw_api_missing_key', 'API Key ارسال نشده است.', array('status' => 401));
         }
 
-        $stored_hash = (string) get_option(self::KEY_HASH_OPTION, '');
-        $candidate_hash = hash('sha256', $token);
-        if ($stored_hash === '' || !hash_equals($stored_hash, $candidate_hash)) {
+        // حدس‌زدن کلید: محدودیت جدا بر اساس IP، فقط روی تلاش‌های ناموفق.
+        if (HMW_Rate_Limiter::peek('fail_' . self::client_ip()) !== null
+            && (int) HMW_Rate_Limiter::peek('fail_' . self::client_ip())['count'] >= self::FAIL_LIMIT
+            && time() - (int) HMW_Rate_Limiter::peek('fail_' . self::client_ip())['start'] < self::RATE_WINDOW) {
+            HMW_Sites::log_reject('rate_limited_ip');
+            return new WP_Error('hmw_api_rate_limited', 'تعداد درخواست‌ها بیش از حد مجاز است. کمی بعد دوباره تلاش کنید.', array('status' => 429));
+        }
+
+        $site = HMW_Sites::find_by_key($token);
+        $bucket = null;
+        if ($site !== null) {
+            if ($site['status'] !== HMW_Sites::STATUS_ACTIVE) {
+                HMW_Sites::log_reject('site_disabled', (string) $site['domain']);
+                return new WP_Error('hmw_site_disabled', 'دسترسی این سایت توسط هی‌مد غیرفعال شده است.', array('status' => 403));
+            }
+            $bucket = 'site_' . (int) $site['id'];
+        } elseif (self::legacy_enabled() && self::legacy_key_matches($token)) {
+            $bucket = 'legacy';
+        } else {
+            HMW_Rate_Limiter::allow('fail_' . self::client_ip(), self::FAIL_LIMIT, self::RATE_WINDOW);
+            HMW_Sites::log_reject('invalid_key');
             return new WP_Error('hmw_api_invalid_key', 'API Key نامعتبر است.', array('status' => 401));
         }
 
+        // Rate Limit بر اساس کلید/سایت (نه IP: پشت CDN همه مشتری‌ها یک IP دارند).
+        if (!HMW_Rate_Limiter::allow($bucket, self::RATE_LIMIT, self::RATE_WINDOW)) {
+            HMW_Sites::log_reject('rate_limited_key', $site['domain'] ?? null);
+            return new WP_Error('hmw_api_rate_limited', 'تعداد درخواست‌ها بیش از حد مجاز است. کمی بعد دوباره تلاش کنید.', array('status' => 429));
+        }
+
+        if ($site !== null) {
+            HMW_Sites::$current = $site;
+            HMW_Sites::touch_seen($site);
+        }
         return true;
+    }
+
+    public static function is_secure_request(): bool {
+        return is_ssl() || (defined('HMW_ALLOW_INSECURE_HTTP') && HMW_ALLOW_INSECURE_HTTP === true);
+    }
+
+    /**
+     * IP درخواست‌دهنده. پشت CDN/پراکسی فقط وقتی هدر مورد اعتماد صریحاً با ثابت
+     * HMW_TRUSTED_IP_HEADER (مثلاً HTTP_CF_CONNECTING_IP) تعریف شده باشد خوانده می‌شود.
+     */
+    public static function client_ip(): string {
+        if (defined('HMW_TRUSTED_IP_HEADER') && is_string(HMW_TRUSTED_IP_HEADER) && !empty($_SERVER[HMW_TRUSTED_IP_HEADER])) {
+            $candidate = trim(explode(',', (string) $_SERVER[HMW_TRUSTED_IP_HEADER])[0]);
+            if (filter_var($candidate, FILTER_VALIDATE_IP)) {
+                return $candidate;
+            }
+        }
+        return isset($_SERVER['REMOTE_ADDR']) ? trim((string) $_SERVER['REMOTE_ADDR']) : 'unknown';
+    }
+
+    // ------------------------------------------------------------------ کلید مشترک قدیمی (سازگاری)
+
+    /**
+     * پیش‌فرض (گزینه ذخیره‌نشده): روشن. ثابت HMW_FORCE_LEGACY_KEY در wp-config
+     * راه اضطراری برگشت است و همیشه آن را روشن می‌کند.
+     */
+    public static function legacy_enabled(): bool {
+        if (defined('HMW_FORCE_LEGACY_KEY') && HMW_FORCE_LEGACY_KEY === true) {
+            return true;
+        }
+        return (string) get_option(self::LEGACY_ENABLED_OPTION, '1') !== '0';
+    }
+
+    /**
+     * خاموش‌کردن فقط با تأیید دوباره؛ روشن‌کردن همیشه آزاد است (راه برگشت).
+     */
+    public static function set_legacy_enabled(bool $enabled, bool $confirmed): bool {
+        if (!$enabled && !$confirmed) {
+            return false;
+        }
+        update_option(self::LEGACY_ENABLED_OPTION, $enabled ? '1' : '0', false);
+        return true;
+    }
+
+    private static function legacy_key_matches(string $token): bool {
+        $stored_hash = (string) get_option(self::KEY_HASH_OPTION, '');
+        return $stored_hash !== '' && hash_equals($stored_hash, hash('sha256', $token));
     }
 
     public static function products(WP_REST_Request $request): WP_REST_Response {
@@ -477,23 +552,6 @@ final class HMW_REST_API {
         return $remote !== '' && in_array($remote, $allowlist, true);
     }
 
-    private static function rate_allowed(): bool {
-        $ip = isset($_SERVER['REMOTE_ADDR']) ? trim((string) $_SERVER['REMOTE_ADDR']) : 'unknown';
-        $key = self::RATE_PREFIX . md5($ip);
-        $bucket = get_transient($key);
-        if (!is_array($bucket) || !isset($bucket['count'])) {
-            set_transient($key, array('count' => 1), self::RATE_WINDOW);
-            return true;
-        }
-        $count = (int) $bucket['count'];
-        if ($count >= self::RATE_LIMIT) {
-            return false;
-        }
-        $bucket['count'] = $count + 1;
-        set_transient($key, $bucket, self::RATE_WINDOW);
-        return true;
-    }
-
     private static function parse_utc_datetime($value): ?string {
         if ($value === null || trim((string) $value) === '') {
             return null;
@@ -686,6 +744,8 @@ final class HMW_REST_API {
         $page = max(1, (int) $request->get_param('page'));
         $per_page = min(200, max(1, (int) $request->get_param('per_page')));
         $offset = ($page - 1) * $per_page;
+
+        HMW_Sites::touch_sync_current(); // «آخرین سینک» سایت مشتری
 
         // is_active=1 عمداً اینجا فیلتر نمی‌شود: is_active خودش یکی از
         // compare_fields است، پس لحظه‌ای که محصولی در منبع غیرفعال/حذف

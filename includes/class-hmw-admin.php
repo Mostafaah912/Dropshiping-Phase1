@@ -12,6 +12,11 @@ final class HMW_Admin {
         add_action('admin_post_hmw_revoke_api_key', array(__CLASS__, 'handle_revoke_api_key'));
         add_action('admin_post_hmw_save_api_ip_allowlist', array(__CLASS__, 'handle_save_api_ip_allowlist'));
         add_action('admin_post_hmw_self_test_rest', array(__CLASS__, 'handle_self_test_rest'));
+        add_action('admin_post_hmw_site_add', array(__CLASS__, 'handle_site_add'));
+        add_action('admin_post_hmw_site_toggle', array(__CLASS__, 'handle_site_toggle'));
+        add_action('admin_post_hmw_site_reissue', array(__CLASS__, 'handle_site_reissue'));
+        add_action('admin_post_hmw_site_delete', array(__CLASS__, 'handle_site_delete'));
+        add_action('admin_post_hmw_legacy_toggle', array(__CLASS__, 'handle_legacy_toggle'));
         add_action('wp_ajax_hmw_full_tick', array(__CLASS__, 'ajax_full_tick'));
         add_action('hmw_daily_full_sync', array('HMW_Sync', 'cron_full'));
         add_action('hmw_full_continue', array('HMW_Sync', 'cron_full_continue'));
@@ -36,6 +41,168 @@ final class HMW_Admin {
             'heymode-wholesale-api',
             array(__CLASS__, 'render_api_page')
         );
+
+        add_submenu_page(
+            'heymode-wholesale',
+            'سایت‌های مشتری',
+            'سایت‌های مشتری',
+            'manage_options',
+            'heymode-wholesale-sites',
+            array(__CLASS__, 'render_sites_page')
+        );
+    }
+
+    public static function render_sites_page(): void {
+        if (!current_user_can('manage_options')) {
+            wp_die(esc_html__('Access denied.', 'heymode-wholesale'));
+        }
+        HMW_DB::ensure_schema();
+        $sites = HMW_Sites::all();
+        $notice = isset($_GET['hmw_sites_notice']) ? sanitize_key(wp_unslash($_GET['hmw_sites_notice'])) : '';
+        $notice_texts = array(
+            'added' => array('success', 'دامنه ثبت شد و آماده فعال‌سازی است.'),
+            'invalid' => array('error', 'نام دامنه معتبر نیست.'),
+            'duplicate' => array('error', 'این دامنه قبلاً ثبت شده است.'),
+            'toggled' => array('success', 'وضعیت سایت تغییر کرد و همان لحظه اعمال شد.'),
+            'reissued' => array('warning', 'کلید قبلی باطل شد. سایت مشتری در بررسی بعدی خودکار دوباره فعال می‌شود.'),
+            'deleted' => array('success', 'سایت حذف شد.'),
+            'legacy_on' => array('success', 'کلید مشترک قدیمی دوباره روشن شد.'),
+            'legacy_off' => array('warning', 'کلید مشترک قدیمی خاموش شد.'),
+            'legacy_need_confirm' => array('error', 'برای خاموش‌کردن کلید قدیمی باید تأیید را تیک بزنید.'),
+        );
+        $status_labels = array(
+            HMW_Sites::STATUS_PENDING => array('در انتظار فعال‌سازی', '#b26b00'),
+            HMW_Sites::STATUS_ACTIVE => array('فعال', '#008a20'),
+            HMW_Sites::STATUS_DISABLED => array('غیرفعال', '#b32d2e'),
+        );
+        $legacy_on = HMW_REST_API::legacy_enabled();
+        $pending_count = count(array_filter($sites, static fn (array $s): bool => $s['status'] !== HMW_Sites::STATUS_ACTIVE));
+        $fmt = static function ($utc): string {
+            $ts = !empty($utc) ? strtotime((string) $utc . ' UTC') : false;
+            return $ts ? wp_date('Y-m-d H:i', $ts, new DateTimeZone(HMW_TIMEZONE)) : '-';
+        };
+        ?>
+        <div class="wrap">
+            <h1>HeyMode Wholesale — سایت‌های مشتری</h1>
+            <?php if (isset($notice_texts[$notice])) : ?>
+                <div class="notice notice-<?php echo esc_attr($notice_texts[$notice][0]); ?> is-dismissible"><p><?php echo esc_html($notice_texts[$notice][1]); ?></p></div>
+            <?php endif; ?>
+
+            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="margin:16px 0;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+                <input type="hidden" name="action" value="hmw_site_add">
+                <?php wp_nonce_field('hmw_site_add'); ?>
+                <input type="text" name="domain" placeholder="example.com" required dir="ltr" style="min-width:260px">
+                <input type="text" name="note" placeholder="یادداشت (اختیاری)" style="min-width:220px">
+                <button class="button button-primary" type="submit">افزودن دامنه</button>
+            </form>
+            <p class="description">دامنه‌ای که اینجا ثبت شود «آماده فعال‌سازی» است؛ افزونه‌ی همان سایت در اولین اجرا خودکار کلید اختصاصی می‌گیرد. کلید هرگز نمایش داده نمی‌شود.</p>
+
+            <table class="widefat striped" style="max-width:1300px">
+                <thead><tr><th>دامنه</th><th>وضعیت</th><th>پیشوند کلید</th><th>ایجاد</th><th>فعال‌سازی</th><th>آخرین ارتباط</th><th>آخرین سینک</th><th>یادداشت</th><th>عملیات</th></tr></thead>
+                <tbody>
+                <?php if (!$sites) : ?><tr><td colspan="9">هنوز سایتی ثبت نشده است.</td></tr><?php endif; ?>
+                <?php foreach ($sites as $site) : ?>
+                    <?php [$label, $color] = $status_labels[$site['status']] ?? array($site['status'], '#50575e'); ?>
+                    <tr>
+                        <td dir="ltr"><?php echo esc_html((string) $site['domain']); ?></td>
+                        <td style="color:<?php echo esc_attr($color); ?>;font-weight:bold"><?php echo esc_html($label); ?></td>
+                        <td><code><?php echo $site['key_prefix'] ? esc_html((string) $site['key_prefix']) . '…' : '-'; ?></code></td>
+                        <td><?php echo esc_html($fmt($site['created_at'])); ?></td>
+                        <td><?php echo esc_html($fmt($site['activated_at'])); ?></td>
+                        <td><?php echo esc_html($fmt($site['last_seen_at'])); ?></td>
+                        <td><?php echo esc_html($fmt($site['last_sync_at'])); ?></td>
+                        <td><?php echo esc_html((string) ($site['note'] ?? '')); ?></td>
+                        <td style="white-space:nowrap">
+                            <?php foreach (array(
+                                array('hmw_site_toggle', $site['status'] === HMW_Sites::STATUS_DISABLED ? 'فعال کردن' : 'غیرفعال کردن', ''),
+                                array('hmw_site_reissue', 'صدور دوباره', 'کلید فعلی این سایت همین لحظه باطل می‌شود. ادامه می‌دهید؟'),
+                                array('hmw_site_delete', 'حذف', 'این سایت حذف شود؟'),
+                            ) as [$action, $text, $confirm]) : ?>
+                                <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="display:inline"<?php echo $confirm !== '' ? ' onsubmit="return confirm(' . esc_attr(wp_json_encode($confirm, JSON_UNESCAPED_UNICODE)) . ');"' : ''; ?>>
+                                    <input type="hidden" name="action" value="<?php echo esc_attr($action); ?>">
+                                    <input type="hidden" name="site_id" value="<?php echo esc_attr((string) $site['id']); ?>">
+                                    <?php wp_nonce_field($action); ?>
+                                    <button class="button button-small" type="submit"><?php echo esc_html($text); ?></button>
+                                </form>
+                            <?php endforeach; ?>
+                        </td>
+                    </tr>
+                <?php endforeach; ?>
+                </tbody>
+            </table>
+
+            <h2 style="margin-top:28px">کلید مشترک قدیمی</h2>
+            <p>وضعیت: <strong style="color:<?php echo $legacy_on ? '#008a20' : '#b32d2e'; ?>"><?php echo $legacy_on ? 'روشن' : 'خاموش'; ?></strong>
+                — تا وقتی روشن باشد، سایت‌هایی که هنوز کلید اختصاصی نگرفته‌اند با کلید قدیمی کار می‌کنند.</p>
+            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+                <input type="hidden" name="action" value="hmw_legacy_toggle">
+                <?php wp_nonce_field('hmw_legacy_toggle'); ?>
+                <?php if ($legacy_on) : ?>
+                    <input type="hidden" name="enable" value="0">
+                    <p><label><input type="checkbox" name="confirm" value="1"> می‌دانم که <?php echo esc_html((string) $pending_count); ?> سایت هنوز فعال اختصاصی نشده است و با خاموش‌کردن کلید قدیمی ممکن است قطع شوند.</label></p>
+                    <button class="button" type="submit">خاموش کردن کلید قدیمی</button>
+                <?php else : ?>
+                    <input type="hidden" name="enable" value="1">
+                    <button class="button button-primary" type="submit">روشن کردن دوباره کلید قدیمی (راه برگشت)</button>
+                <?php endif; ?>
+            </form>
+            <p class="description">راه اضطراری: افزودن <code>define('HMW_FORCE_LEGACY_KEY', true);</code> به wp-config.php کلید قدیمی را همیشه روشن می‌کند.</p>
+
+            <h2 style="margin-top:28px">درخواست‌های ردشده‌ی اخیر</h2>
+            <?php $counts = HMW_Sites::reject_counts(); $log = HMW_Sites::reject_log(); ?>
+            <p><?php foreach ($counts as $reason => $info) : ?><span style="margin-left:14px"><code><?php echo esc_html((string) $reason); ?></code>: <?php echo esc_html((string) (int) ($info['count'] ?? 0)); ?></span><?php endforeach; ?><?php if (!$counts) : ?>موردی ثبت نشده است.<?php endif; ?></p>
+            <?php if ($log) : ?>
+                <table class="widefat striped" style="max-width:900px"><thead><tr><th>زمان (UTC)</th><th>علت</th><th>دامنه</th><th>IP</th></tr></thead><tbody>
+                <?php foreach (array_slice($log, 0, 20) as $entry) : ?>
+                    <tr><td><?php echo esc_html((string) ($entry['at'] ?? '')); ?></td><td><?php echo esc_html((string) ($entry['reason'] ?? '')); ?></td><td dir="ltr"><?php echo esc_html((string) ($entry['domain'] ?? '-')); ?></td><td dir="ltr"><?php echo esc_html((string) ($entry['ip'] ?? '')); ?></td></tr>
+                <?php endforeach; ?>
+                </tbody></table>
+            <?php endif; ?>
+        </div>
+        <?php
+    }
+
+    private static function sites_redirect(string $notice): void {
+        wp_safe_redirect(add_query_arg(array('page' => 'heymode-wholesale-sites', 'hmw_sites_notice' => $notice), admin_url('admin.php')));
+        exit;
+    }
+
+    public static function handle_site_add(): void {
+        self::guard('hmw_site_add');
+        $result = HMW_Sites::add(
+            isset($_POST['domain']) ? (string) wp_unslash($_POST['domain']) : '',
+            isset($_POST['note']) ? (string) wp_unslash($_POST['note']) : ''
+        );
+        self::sites_redirect($result['success'] ? 'added' : (strpos((string) $result['message'], 'قبلاً') !== false ? 'duplicate' : 'invalid'));
+    }
+
+    public static function handle_site_toggle(): void {
+        self::guard('hmw_site_toggle');
+        $id = isset($_POST['site_id']) ? (int) $_POST['site_id'] : 0;
+        $row = HMW_Sites::find($id);
+        if ($row) {
+            HMW_Sites::set_status($id, $row['status'] === HMW_Sites::STATUS_DISABLED ? HMW_Sites::STATUS_ACTIVE : HMW_Sites::STATUS_DISABLED);
+        }
+        self::sites_redirect('toggled');
+    }
+
+    public static function handle_site_reissue(): void {
+        self::guard('hmw_site_reissue');
+        HMW_Sites::reissue(isset($_POST['site_id']) ? (int) $_POST['site_id'] : 0);
+        self::sites_redirect('reissued');
+    }
+
+    public static function handle_site_delete(): void {
+        self::guard('hmw_site_delete');
+        HMW_Sites::delete(isset($_POST['site_id']) ? (int) $_POST['site_id'] : 0);
+        self::sites_redirect('deleted');
+    }
+
+    public static function handle_legacy_toggle(): void {
+        self::guard('hmw_legacy_toggle');
+        $enable = !empty($_POST['enable']);
+        $ok = HMW_REST_API::set_legacy_enabled($enable, !empty($_POST['confirm']));
+        self::sites_redirect($ok ? ($enable ? 'legacy_on' : 'legacy_off') : 'legacy_need_confirm');
     }
 
     public static function render_page(): void {
